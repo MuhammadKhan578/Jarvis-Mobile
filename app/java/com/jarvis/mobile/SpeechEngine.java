@@ -56,10 +56,12 @@ public class SpeechEngine {
             // actions (Roman Urdu + English)
             "kholo", "khol do", "band karo", "chalao", "batao", "dikhao", "lagao", "suno",
             "likho", "banao", "bhejo", "padho", "bajao", "open", "launch", "play", "send",
-            "call", "check", "set",
+            "call", "check", "set", "install", "install karo", "download", "search", "dhundo",
+            "tap", "click", "type", "subscribe", "follow", "like", "share",
             // phone features
             "flashlight", "torch", "volume", "timer", "reminder", "inbox", "notification",
             "screenshot", "battery", "brightness", "wifi", "bluetooth", "airplane mode",
+            "duolingo", "whatsapp", "instagram", "tiktok", "application", "automation",
             // small talk
             "kaise ho", "kya haal hai", "time kya hai", "good morning", "good night"
     };

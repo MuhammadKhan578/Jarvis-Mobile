@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Jarvis</string>
+    <string name="automation_label">Jarvis Automation</string>
+    <string name="accessibility_desc">Allows Jarvis to tap buttons for you: search and install apps on the Play Store, read the current screen, type in fields, and press Back or Home. Jarvis never reads passwords.</string>
 </resources>

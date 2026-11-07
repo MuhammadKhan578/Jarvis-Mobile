@@ -127,6 +127,19 @@ const Native = window.Android || {
   copyText: (t) => { try { navigator.clipboard.writeText(t); } catch (e) { } },
   log: (m) => console.log('[Native]', m),
   openTtsSettings: () => { },
+  setNeuralPrefs: () => { },
+  getNeuralPrefs: () => JSON.stringify({ enabled: true, voice: 'Charon' }),
+  hasAutomation: () => false,
+  openAutomationSettings: () => { },
+  startInstall: (id, name) => {
+    setTimeout(() => window.jarvisAutomationDone && window.jarvisAutomationDone(id,
+      JSON.stringify({ ok: false, message: 'Automation available nahi hai.', needs_user_action: true })), 50);
+  },
+  uiClick: () => false,
+  uiClickId: () => false,
+  uiDump: () => '',
+  uiType: () => false,
+  systemAction: () => false,
   openUrl: (u) => { try { window.open(u, '_blank'); } catch (e) { } }
 };
 
@@ -138,13 +151,16 @@ const DEFAULTS = {
   voiceLocked: true,
   rate: 0.97,
   voiceName: '',
+  neuralVoice: true,
+  neuralVoiceName: 'Charon',
   handsFree: false,
   wakeRequired: true,
   onboarded: false
 };
 
-const FAST_MODELS = ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-2.5-flash-lite'];
-const SMART_MODELS = ['gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite'];
+// Stronger models by default: the old lite-first list made answers shallow.
+const FAST_MODELS = ['gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-flash'];
+const SMART_MODELS = ['gemini-3.8-flash', 'gemini-2.5-pro', 'gemini-3.1-pro-preview'];
 
 // Fresh install: no personal facts are pre-loaded. Jarvis learns only what
 // the user chooses to tell it, and everything stays on the phone.
@@ -273,7 +289,8 @@ function speak(roman, urdu) {
   clearListenSafety();
   setState('speaking');
   clearTimeout(speakSafety);
-  const est = Math.min(30000, 3500 + r.length * 110);
+  // Neural voice needs a moment to synthesise, then speaks at normal speed.
+  const est = Math.min(90000, 8000 + r.length * 150);
   speakSafety = setTimeout(() => {
     if (state === 'speaking') finishSpeaking();
   }, est);
@@ -464,7 +481,56 @@ function updateConnState() {
 }
 
 /* ============================================================== TOOL CALLS */
+const pendingAutomation = {};
+let automationSeq = 0;
+
+/* Native posts the real install result here (Play Store install takes time). */
+window.jarvisAutomationDone = function (id, json) {
+  const p = pendingAutomation[id];
+  if (!p) return;
+  delete pendingAutomation[id];
+  clearTimeout(p.timer);
+  let result;
+  try { result = JSON.parse(json); } catch (e) { result = { ok: false, message: String(json) }; }
+  if (!result || typeof result !== 'object') result = { ok: false, message: 'Bad automation result' };
+  if (typeof result.ok !== 'boolean') result.ok = false;
+  p.resolve(result);
+};
+
+/**
+ * Runs a phone tool. Most tools answer immediately; install_app waits for the
+ * real Play Store result (search -> Install -> wait -> Open) and can take a
+ * couple of minutes for a big app.
+ */
 function callTool(name, args) {
+  if (name === 'install_app') {
+    return new Promise((resolve) => {
+      const id = 'auto' + (++automationSeq);
+      const appName = String((args && args.app_name) || '').trim();
+      if (!appName) {
+        resolve({ ok: false, message: 'App ka naam nahi mila.', needs_user_action: false });
+        return;
+      }
+      const timer = setTimeout(() => {
+        if (!pendingAutomation[id]) return;
+        delete pendingAutomation[id];
+        resolve({
+          ok: false,
+          message: 'Install ka jawab nahi mila. Play Store khol kar Install dabaiye.',
+          needs_user_action: true
+        });
+      }, 150000);
+      pendingAutomation[id] = { resolve, timer };
+      try {
+        Native.startInstall(id, appName);
+      } catch (e) {
+        delete pendingAutomation[id];
+        clearTimeout(timer);
+        resolve({ ok: false, message: 'Install start nahi hua: ' + e, needs_user_action: true });
+      }
+    });
+  }
+
   let raw = '';
   try {
     raw = Native.executeTool(name, JSON.stringify(args || {}));
@@ -1074,6 +1140,49 @@ function toolDeclarations() {
       }
     },
     {
+      name: 'install_app',
+      description: 'Search an app on the Play Store, tap Install (or Update), wait for the download, then open it. Use this for "install Duolingo", "ye app install karo". Requires Phone automation enabled; if it is off the result asks the user to enable it.',
+      parameters: {
+        type: 'OBJECT',
+        properties: {
+          app_name: { type: 'STRING', description: 'Exact app name, e.g. Duolingo' }
+        },
+        required: ['app_name']
+      }
+    },
+    {
+      name: 'ui_dump',
+      description: 'Read the visible text and buttons of the CURRENT screen (any app). Use it when the user refers to what is on screen.',
+      parameters: { type: 'OBJECT', properties: {} }
+    },
+    {
+      name: 'ui_click',
+      description: 'Tap a visible button, link or label on the current screen by its text. Works in any app when Phone automation is enabled.',
+      parameters: {
+        type: 'OBJECT',
+        properties: { text: { type: 'STRING', description: 'Visible label, e.g. Install or Follow' } },
+        required: ['text']
+      }
+    },
+    {
+      name: 'ui_type',
+      description: 'Type text into the focused (or first) text field of the current screen.',
+      parameters: {
+        type: 'OBJECT',
+        properties: { text: { type: 'STRING' } },
+        required: ['text']
+      }
+    },
+    {
+      name: 'system_action',
+      description: 'Press a phone system button: back, home, recents, notifications, quick_settings, lock, screenshot.',
+      parameters: {
+        type: 'OBJECT',
+        properties: { action: { type: 'STRING' } },
+        required: ['action']
+      }
+    },
+    {
       name: 'remember',
       description: 'Save a lasting fact about the user (name, preferences, important things).',
       parameters: {
@@ -1090,12 +1199,15 @@ function buildSystemPrompt() {
   const langLine = langMode === 'en'
     ? 'The user chose ENGLISH ONLY. Reply in English. The ROMAN line must be plain English and the URDU line repeats the same English.'
     : langMode === 'ur'
-      ? 'The user chose ROMAN URDU. Reply in natural Pakistani Roman Urdu (simple everyday words, not English-accented), and give the same in Urdu script.'
+      ? 'The user chose ROMAN URDU. Reply in natural Pakistani Roman Urdu (simple everyday words, like a friend talking), and give the same in Urdu script.'
       : 'Match the user: English input -> English reply; Roman Urdu / Urdu / Hindi input -> natural Pakistani Roman Urdu reply. The ROMAN line must sound like a real Pakistani person talking casually, never like an English sentence with Urdu words pasted in.';
 
   const facts = (memory.facts || []).length
     ? memory.facts.map(f => '- ' + f).join('\n')
     : '- (nothing saved yet)';
+
+  let automation = false;
+  try { automation = !!Native.hasAutomation(); } catch (e) { }
 
   const now = new Date();
   const timeText = now.toLocaleString('en-PK', {
@@ -1104,19 +1216,20 @@ function buildSystemPrompt() {
   });
 
   return [
-    'You are J.A.R.V.I.S. ("Jarvis"), a fast, friendly and honest Android assistant living on the user\'s phone. Address the user as "sir".',
-    'You are the MOBILE version of Jarvis. Do not pretend to control a PC, files, Word, or desktop apps. If asked for something only a PC can do, say briefly that this is the mobile version and offer a phone alternative.',
-    'The user speaks English and Roman Urdu. Speech recognition makes mistakes: "jaadui", "jadui", "jarvis" all mean Jarvis; infer the real meaning from context.',
-    'YOU CAN ACT ON THE PHONE through the tools. Use tools immediately; do not ask for confirmation. Chain several tools when needed.',
-    'HONESTY RULES (very important):',
-    '- Claim a task is done only when the tool result has ok:true.',
-    '- If a result has needs_user_action:true, say it is ready and the user must tap Send / Confirm / Subscribe. Never say it was already sent, subscribed, or marked.',
-    '- YouTube subscribe cannot be automated. Open the channel; never claim "subscribed".',
-    '- Gmail: read_inbox reads notification summaries only. Marking an email read is NOT possible on Android. Never claim an email was marked read or sent. Offer to open Gmail.',
-    '- If a tool fails (ok:false), tell the user the real reason in one short sentence.',
-    '- Never invent emails, messages, alarms or actions.',
-    'STYLE: replies are spoken out loud. Use 1-3 short sentences, no lists, no markdown, no emojis. Be warm, quick and a little witty.',
-    'MEMORY (things you know about the user):',
+    'You are J.A.R.V.I.S. ("Jarvis"), the user\'s personal Android assistant — the same Jarvis as on their PC, now living inside their phone. Call the user "sir".',
+    'PERSONALITY: warm, quick-witted, calm and extremely capable. You have real opinions: when asked, give ONE clear recommendation with a short reason, never "it depends". You may ask one short follow-up question when it truly helps.',
+    'You are the MOBILE version: you control this phone, not a PC. If something is PC-only (Word, desktop files, PC apps), say it in one short line and offer the phone alternative.',
+    'THINK FIRST: the user speaks English and Roman Urdu, and speech recognition makes mistakes ("jaadui", "travis" = Jarvis; wrong app or song names). Work out the real intent from context. Resolve "isko", "woh", "yahan" from the conversation and from ui_dump when the user is talking about the screen.',
+    'ACT, DO NOT LECTURE: use tools immediately and chain as many as needed until the WHOLE request is done. Never reply with instructions telling the user to do the remaining steps themselves. If a tool fails, try a different approach, then report the real reason in one short sentence.',
+    'HONESTY (very important): claim a task is done only when the tool result has ok:true. If the result has needs_user_action:true, say it is ready and what to tap. Never invent emails, messages, alarms, installs or subscriptions. YouTube subscribe and Gmail "mark as read" cannot be automated.',
+    'PHONE POWERS: open apps; Play Store search and REAL install (install_app taps Install and Open itself when Phone automation is on); read the current screen (ui_dump); tap any visible button or label (ui_click); type into fields (ui_type); Back/Home/Recents/Notifications (system_action); YouTube search; WhatsApp/SMS/email drafts; alarms; timers; maps; volume; torch; battery/network status; clipboard; long-term memory.',
+    'INSTALL FLOW: for "Duolingo install karo" or "Play Store se X install karo" call install_app ONCE with the exact app name. Do not also call open_play_store. Wait for its result, then report exactly what happened. If automation is off, the result says so: tell the user in one line to enable Settings > Phone automation, and that Play Store is already open for a manual tap.',
+    'AUTOMATION: ' + (automation
+      ? 'Phone automation is ON — you can tap through other apps yourself. Use ui_dump to see each screen before tapping.'
+      : 'Phone automation is OFF — ui_click / ui_type / ui_dump / system_action and full install will ask the user to enable it. App opens, Play Store search and normal tools still work.'),
+    'MEMORY: when the user shares something lasting or says "yaad rakho", call remember with a short English fact. Use saved facts naturally; never read the list out.',
+    'STYLE: everything is spoken out loud. For actions: 1-2 short sentences. For questions: up to 4 short spoken sentences. No lists, no markdown, no emojis, no stage directions.',
+    'MEMORY (about the user):',
     facts,
     'LANGUAGE: ' + langLine,
     'CURRENT DATE AND TIME: ' + timeText,
@@ -1198,12 +1311,12 @@ async function runTool(name, args) {
 
 async function toolLoop(model, baseContents, systemPrompt) {
   const contents = baseContents.map(c => JSON.parse(JSON.stringify(c)));
-  for (let round = 0; round < 5; round++) {
+  for (let round = 0; round < 8; round++) {
     const payload = {
       systemInstruction: { parts: [{ text: systemPrompt }] },
       contents,
       tools: [{ functionDeclarations: toolDeclarations() }],
-      generationConfig: { temperature: 0.72, maxOutputTokens: 1400 }
+      generationConfig: { temperature: 0.55, maxOutputTokens: 1600 }
     };
     const raw = await geminiRequest(model, payload);
     let data;
@@ -1242,7 +1355,7 @@ async function toolLoop(model, baseContents, systemPrompt) {
 }
 
 async function askBrain(userText) {
-  const contents = history.slice(-14).map(item => ({
+  const contents = history.slice(-20).map(item => ({
     role: item.role === 'user' ? 'user' : 'model',
     parts: [{ text: item.text }]
   }));
@@ -1337,6 +1450,7 @@ function saveSettings() {
   saveJSON(LS.settings, settings);
   try {
     Native.setVoicePrefs(settings.voiceGender, settings.rate, settings.voiceName || '');
+    Native.setNeuralPrefs(settings.neuralVoice !== false, settings.neuralVoiceName || 'Charon');
   } catch (e) { }
 }
 
@@ -1404,6 +1518,28 @@ function renderSettings() {
     urduHint.textContent = has
       ? 'Urdu TTS voice mil gayi: Urdu script mein sunaya jayega.'
       : 'Urdu TTS voice install nahi. Roman Urdu ko en-IN male voice mein sunaya jayega.';
+  }
+
+  const neuralToggle = $('#neuralToggle');
+  if (neuralToggle) neuralToggle.checked = settings.neuralVoice !== false;
+  const neuralVoice = $('#neuralVoice');
+  if (neuralVoice) neuralVoice.value = settings.neuralVoiceName || 'Charon';
+  const neuralHint = $('#neuralHint');
+  if (neuralHint) {
+    neuralHint.textContent = settings.neuralVoice === false
+      ? 'Neural voice off — Android ki default awaaz.'
+      : 'Neural voice: ' + (settings.neuralVoiceName || 'Charon') + ' (Gemini TTS)';
+  }
+
+  const autoState = $('#autoState');
+  const autoBtn = $('#autoBtn');
+  if (autoState) {
+    let on = false;
+    try { on = !!Native.hasAutomation(); } catch (e) { }
+    autoState.textContent = on
+      ? 'ON — Jarvis khud buttons dabata hai, Play Store install bhi.'
+      : 'Off hai — Play Store install aur screen taps ke liye on karein.';
+    if (autoBtn) autoBtn.textContent = on ? 'Settings' : 'Enable';
   }
 
   const memCount = $('#memoryCount');
@@ -1515,8 +1651,16 @@ function applySettingsInitial() {
         settings.voiceName = vp.voice_name || '';
       }
     } catch (e) { }
+    try {
+      const np = JSON.parse(Native.getNeuralPrefs());
+      if (np) {
+        settings.neuralVoice = np.enabled !== false;
+        settings.neuralVoiceName = np.voice || 'Charon';
+      }
+    } catch (e) { }
   }
   settings.voiceGender = settings.voiceGender === 'female' ? 'female' : 'male';
+  if (!settings.neuralVoiceName) settings.neuralVoiceName = 'Charon';
   saveSettings();
   renderSettings();
 }
@@ -1880,6 +2024,26 @@ function bindEvents() {
     try { Native.openTtsSettings(); } catch (e) { }
   });
 
+  const neuralToggle = $('#neuralToggle');
+  if (neuralToggle) neuralToggle.addEventListener('change', e => {
+    settings.neuralVoice = !!e.target.checked;
+    saveSettings();
+    renderSettings();
+    toast(settings.neuralVoice ? 'Neural voice ON — PC jaisi awaaz.' : 'Neural voice OFF — Android voice.');
+  });
+  const neuralVoice = $('#neuralVoice');
+  if (neuralVoice) neuralVoice.addEventListener('change', e => {
+    settings.neuralVoiceName = e.target.value || 'Charon';
+    saveSettings();
+    renderSettings();
+    testVoice();
+  });
+  const autoBtn = $('#autoBtn');
+  if (autoBtn) autoBtn.addEventListener('click', () => {
+    try { Native.openAutomationSettings(); } catch (e) { }
+    toast('Accessibility mein "Jarvis Automation" on karein.');
+  });
+
   $('#handsFreeToggle').addEventListener('change', e => {
     settings.handsFree = !!e.target.checked;
     saveSettings();
@@ -2040,6 +2204,8 @@ function init() {
       native: hasNative,
       key: !!Native.hasApiKey(),
       urduVoice: (() => { try { return Native.hasUrduVoice(); } catch (e) { return false; } })(),
+      neural: (() => { try { return JSON.parse(Native.getNeuralPrefs()); } catch (e) { return null; } })(),
+      automation: (() => { try { return !!Native.hasAutomation(); } catch (e) { return false; } })(),
       status,
       model: settings.model,
       voice: settings.voiceGender,

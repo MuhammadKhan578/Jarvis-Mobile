@@ -104,6 +104,11 @@ public final class AppIntents {
                 case "notification_access": return openNotificationAccess(context);
                 case "tts_settings": return openTtsSettings(context);
                 case "open_camera": return openCamera(context);
+                case "automation_settings": return openAutomationSettings(context);
+                case "ui_click": return uiClick(context, args.optString("text", ""));
+                case "ui_type": return uiType(context, args.optString("text", ""));
+                case "ui_dump": return uiDump(context);
+                case "system_action": return systemAction(context, args.optString("action", ""));
                 default: return res(false, "Mobile app mein yeh tool nahi hai: " + tool, false, null);
             }
         } catch (Exception e) {
@@ -370,11 +375,67 @@ public final class AppIntents {
 
     private static String playStore(Context c, String appName) {
         String q = appName == null ? "" : appName.trim();
-        Intent i = q.isEmpty()
-                ? new Intent(Intent.ACTION_VIEW, Uri.parse("https://play.google.com/store"))
-                : new Intent(Intent.ACTION_VIEW, Uri.parse("https://play.google.com/store/search?q=" + Uri.encode(q)));
-        boolean ok = start(c, i);
+        String market = q.isEmpty()
+                ? "market://search?q=apps"
+                : "market://search?q=" + Uri.encode(q) + "&c=apps";
+        Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(market));
+        i.setPackage("com.android.vending");
+        if (start(c, i)) {
+            return res(true, q.isEmpty() ? "Play Store khol diya." : "Play Store par '" + q + "' search khol diya.", false, null);
+        }
+        String web = q.isEmpty()
+                ? "https://play.google.com/store/apps"
+                : "https://play.google.com/store/search?q=" + Uri.encode(q) + "&c=apps";
+        boolean ok = start(c, new Intent(Intent.ACTION_VIEW, Uri.parse(web)));
         return res(ok, ok ? "Play Store khol diya." : "Play Store nahi khul saka.", false, null);
+    }
+
+    private static String openAutomationSettings(Context c) {
+        boolean ok = start(c, new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+        return res(ok,
+                ok ? "Accessibility settings khul gayi. 'Jarvis Automation' on karein."
+                        : "Accessibility settings nahi khuli.",
+                true, null);
+    }
+
+    private static String uiClick(Context c, String text) {
+        if (!JarvisAccessibilityService.isConnected()) {
+            return res(false, "Automation off hai. Settings se on karein.", true, null);
+        }
+        boolean ok = JarvisAccessibilityService.clickText(text);
+        return res(ok,
+                ok ? "'" + text + "' par tap kar diya." : "Screen par '" + text + "' nahi mila.",
+                !ok, null);
+    }
+
+    private static String uiType(Context c, String text) {
+        if (!JarvisAccessibilityService.isConnected()) {
+            return res(false, "Automation off hai. Settings se on karein.", true, null);
+        }
+        boolean ok = JarvisAccessibilityService.setText(text);
+        return res(ok, ok ? "Text likh diya." : "Koi text field nahi mili.", !ok, null);
+    }
+
+    private static String uiDump(Context c) {
+        if (!JarvisAccessibilityService.isConnected()) {
+            return res(false, "Automation off hai. Settings se on karein.", true, null);
+        }
+        String screen = JarvisAccessibilityService.dumpTexts();
+        try {
+            JSONObject data = new JSONObject();
+            data.put("screen", screen);
+            return res(true, screen.isEmpty() ? "Screen khali lag rahi hai." : "Screen padh li.", false, data);
+        } catch (Exception e) {
+            return res(false, "Screen padhi nahi gayi.", false, null);
+        }
+    }
+
+    private static String systemAction(Context c, String action) {
+        if (!JarvisAccessibilityService.isConnected()) {
+            return res(false, "Automation off hai. Settings se on karein.", true, null);
+        }
+        boolean ok = JarvisAccessibilityService.performAction(action);
+        return res(ok, ok ? action + " kar diya." : "Yeh system action nahi hua.", !ok, null);
     }
 
     private static String openSettings(Context c, String section) {

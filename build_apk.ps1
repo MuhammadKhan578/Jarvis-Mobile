@@ -15,8 +15,8 @@
 param(
     [string]$Sdk = "",
     [string]$Jdk = "",
-    [string]$VersionName = "1.2.0",
-    [int]$VersionCode = 3
+    [string]$VersionName = "1.3.0",
+    [int]$VersionCode = 4
 )
 
 $ErrorActionPreference = "Stop"

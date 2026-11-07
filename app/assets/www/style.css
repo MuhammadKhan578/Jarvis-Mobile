@@ -464,6 +464,22 @@ body[data-state="speaking"] .state-label { color: #9ff6ff; }
 }
 .key-row input:focus, #memoryInput:focus { border-color: rgba(56, 240, 255, .4); }
 
+.mini-select {
+  width: 100%;
+  height: 42px;
+  margin-top: 10px;
+  border-radius: 11px;
+  border: 1px solid var(--line-soft);
+  background: rgba(5, 12, 19, 0.8);
+  color: #cfeeff;
+  padding: 0 10px;
+  font-size: 13px;
+  outline: none;
+  -webkit-appearance: none;
+  appearance: none;
+}
+.mini-select:focus { border-color: rgba(56, 240, 255, .4); }
+
 .mini-btn {
   flex: none;
   height: 38px;

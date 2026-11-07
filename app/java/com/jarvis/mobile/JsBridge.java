@@ -29,6 +29,8 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 import java.util.Properties;
 
@@ -36,20 +38,26 @@ import java.util.Properties;
  * The bridge between the HTML interface and Android hardware.
  * Everything here reports the real result; no action is ever pretended.
  */
-public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener {
+public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, NeuralTts.Listener {
 
     private static final String TAG = "JarvisMobile";
     private static final String PREFS = "jarvis_mobile";
     private static final String KEY_GEMINI = "gemini_key";
     private static final String KEY_SEEDED = "key_seeded";
+    private static final String KEY_NEURAL = "neural_voice";
+    private static final String KEY_NEURAL_VOICE = "neural_voice_name";
 
     private final Activity activity;
     private final WebView web;
     private final TtsEngine tts;
+    private final NeuralTts neural;
     private final SpeechEngine speech;
     private final SharedPreferences prefs;
     private final Handler main = new Handler(Looper.getMainLooper());
     private boolean pendingListen = false;
+    private String pendingRoman = "";
+    private String pendingUrdu = "";
+    private boolean neuralActive = false;
 
     public JsBridge(Activity activity, WebView web, TtsEngine tts, SpeechEngine speech) {
         this.activity = activity;
@@ -58,6 +66,8 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener {
         this.speech = speech;
         this.prefs = activity.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         this.tts.setListener(this);
+        this.neural = new NeuralTts(activity);
+        this.neural.setListener(this);
         GmailListener.init(activity);
     }
 
@@ -84,17 +94,104 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener {
 
     @Override
     public void onTtsError(String message) {
+        neuralActive = false;
         callJs("window.jarvisNative&&jarvisNative.onTtsError(" + q(message) + ")");
     }
 
+    @Override
+    public void onNeuralDone() {
+        neuralActive = false;
+        callJs("window.jarvisNative&&jarvisNative.onTtsDone()");
+    }
+
+    @Override
+    public void onNeuralError(String message) {
+        // Already played a sentence? Then a fallback would repeat it. Just end.
+        boolean played = neural.hasPlayedAny();
+        neuralActive = false;
+        if (played) {
+            callJs("window.jarvisNative&&jarvisNative.onTtsDone()");
+            return;
+        }
+        Log.w(TAG, "Neural voice failed, using system voice: " + message);
+        tts.speak(pendingRoman, pendingUrdu);
+    }
+
+    /**
+     * Speaks the reply.  Prefers the natural Gemini neural voice (same quality
+     * family as the PC version) and falls back to the Android voice if the
+     * request cannot be completed.
+     */
     @JavascriptInterface
     public void speak(String roman, String urdu) {
-        tts.speak(roman, urdu);
+        pendingRoman = roman == null ? "" : roman.trim();
+        pendingUrdu = urdu == null ? "" : urdu.trim();
+        if (pendingRoman.isEmpty() && pendingUrdu.isEmpty()) {
+            callJs("window.jarvisNative&&jarvisNative.onTtsDone()");
+            return;
+        }
+        boolean wantNeural = prefs.getBoolean(KEY_NEURAL, true) && !readKey().isEmpty();
+        String text = speechText(pendingRoman, pendingUrdu);
+        List<String> sentences = splitSentences(text);
+        if (wantNeural && !sentences.isEmpty()) {
+            tts.stop();
+            neuralActive = true;
+            neural.speak(sentences, prefs.getString(KEY_NEURAL_VOICE, "Charon"), readKey());
+            return;
+        }
+        neural.stop();
+        neuralActive = false;
+        tts.speak(pendingRoman, pendingUrdu);
     }
 
     @JavascriptInterface
     public void stopSpeaking() {
+        neural.stop();
+        neuralActive = false;
         tts.stop();
+    }
+
+    /** Urdu script sounds right with the neural voice; Roman text uses English. */
+    private static String speechText(String roman, String urdu) {
+        if (urdu != null && urdu.matches(".*[\\u0600-\\u06FF].*")) return urdu;
+        return roman == null ? "" : roman;
+    }
+
+    private static List<String> splitSentences(String text) {
+        List<String> out = new ArrayList<>();
+        String t = text == null ? "" : text.replaceAll("\\s+", " ").trim();
+        if (t.isEmpty()) return out;
+        String[] parts = t.split("(?<=[.!?\\u06D4\\u061F])\\s+");
+        StringBuilder buf = new StringBuilder();
+        for (String p : parts) {
+            if (p == null || p.trim().isEmpty()) continue;
+            String s = p.trim();
+            if (s.length() > 220) {
+                // Very long sentence: break at commas so audio starts sooner.
+                for (String piece : s.split("(?<=[,;])\\s+")) {
+                    if (piece.trim().isEmpty()) continue;
+                    if (buf.length() + piece.length() > 220 && buf.length() > 0) {
+                        out.add(buf.toString().trim());
+                        buf.setLength(0);
+                    }
+                    buf.append(piece.trim()).append(' ');
+                }
+            } else {
+                if (buf.length() + s.length() > 220 && buf.length() > 0) {
+                    out.add(buf.toString().trim());
+                    buf.setLength(0);
+                }
+                buf.append(s).append(' ');
+            }
+        }
+        if (buf.length() > 0) out.add(buf.toString().trim());
+        if (out.isEmpty()) out.add(t);
+        // Keep the queue small; merge extra sentences into the last one.
+        while (out.size() > 6) {
+            int last = out.size() - 1;
+            out.set(last - 1, out.get(last - 1) + " " + out.remove(last));
+        }
+        return out;
     }
 
     @JavascriptInterface
@@ -105,6 +202,24 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener {
                 .putString("voice_name", voiceName == null ? "" : voiceName)
                 .apply();
         tts.setPrefs(gender, (float) rate, voiceName);
+    }
+
+    @JavascriptInterface
+    public void setNeuralPrefs(boolean enabled, String voiceName) {
+        String v = (voiceName == null || voiceName.trim().isEmpty()) ? "Charon" : voiceName.trim();
+        prefs.edit().putBoolean(KEY_NEURAL, enabled).putString(KEY_NEURAL_VOICE, v).apply();
+    }
+
+    @JavascriptInterface
+    public String getNeuralPrefs() {
+        try {
+            JSONObject o = new JSONObject();
+            o.put("enabled", prefs.getBoolean(KEY_NEURAL, true));
+            o.put("voice", prefs.getString(KEY_NEURAL_VOICE, "Charon"));
+            return o.toString();
+        } catch (Exception e) {
+            return "{\"enabled\":true,\"voice\":\"Charon\"}";
+        }
     }
 
     @JavascriptInterface
@@ -145,6 +260,106 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener {
         } catch (Exception e) {
             toast("Browser open nahi ho saka.");
         }
+    }
+
+    // ------------------------------------------------------- phone automation
+
+    @JavascriptInterface
+    public boolean hasAutomation() {
+        return JarvisAccessibilityService.isEnabled(activity);
+    }
+
+    @JavascriptInterface
+    public void openAutomationSettings() {
+        main.post(() -> {
+            try {
+                activity.startActivity(new Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS));
+                toast("Jarvis Automation on karein.");
+            } catch (Exception e) {
+                toast("Accessibility settings nahi khuli.");
+            }
+        });
+    }
+
+    /**
+     * Searches the Play Store and installs the app by tapping the real buttons.
+     * The final result is delivered to JS as window.jarvisAutomationDone(id, json).
+     */
+    @JavascriptInterface
+    public void startInstall(final String requestId, final String appName) {
+        final String name = appName == null ? "" : appName.trim();
+        if (name.isEmpty()) {
+            automationResult(requestId, false, "App ka naam nahi mila.", false);
+            return;
+        }
+        main.post(() -> {
+            // Always open the real Play Store search first, so a manual tap is
+            // possible even when automation is switched off.
+            try {
+                JSONObject args = new JSONObject().put("app_name", name);
+                AppIntents.execute(activity, "open_play_store", args);
+            } catch (Exception ignored) { }
+            if (!JarvisAccessibilityService.isConnected()) {
+                automationResult(requestId, false,
+                        "Automation off hai. Play Store khul gaya — Install khud dabaiye, "
+                                + "ya Settings > Phone automation on karein.", true);
+                return;
+            }
+            try {
+                JarvisAccessibilityService svc = JarvisAccessibilityService.instance();
+                if (svc == null) {
+                    automationResult(requestId, false, "Automation service ready nahi hai.", true);
+                    return;
+                }
+                svc.startInstallJob(requestId, name, (id, result) -> {
+                    String json = result == null ? "{\"ok\":false}" : result.toString();
+                    callJs("window.jarvisAutomationDone&&window.jarvisAutomationDone("
+                            + q(id) + "," + q(json) + ")");
+                    try {
+                        String msg = result == null ? "Install fail hua." : result.optString("message", "");
+                        if (!msg.isEmpty()) toast(msg);
+                    } catch (Exception ignored) { }
+                });
+            } catch (Exception e) {
+                automationResult(requestId, false, "Install shuru nahi ho saka: " + e.getMessage(), true);
+            }
+        });
+    }
+
+    private void automationResult(String id, boolean ok, String message, boolean needsUser) {
+        try {
+            JSONObject o = new JSONObject();
+            o.put("ok", ok);
+            o.put("message", message == null ? "" : message);
+            o.put("needs_user_action", needsUser);
+            callJs("window.jarvisAutomationDone&&window.jarvisAutomationDone("
+                    + q(id) + "," + q(o.toString()) + ")");
+        } catch (Exception ignored) { }
+    }
+
+    @JavascriptInterface
+    public boolean uiClick(String text) {
+        return JarvisAccessibilityService.clickText(text);
+    }
+
+    @JavascriptInterface
+    public boolean uiClickId(String idPart) {
+        return JarvisAccessibilityService.clickIdPart(idPart);
+    }
+
+    @JavascriptInterface
+    public String uiDump() {
+        return JarvisAccessibilityService.dumpTexts();
+    }
+
+    @JavascriptInterface
+    public boolean uiType(String text) {
+        return JarvisAccessibilityService.setText(text);
+    }
+
+    @JavascriptInterface
+    public boolean systemAction(String action) {
+        return JarvisAccessibilityService.performAction(action);
     }
 
     // ------------------------------------------------------- STT callbacks
@@ -391,7 +606,7 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener {
 
     @JavascriptInterface
     public String version() {
-        return "1.2.0";
+        return "1.3.0";
     }
 
     @JavascriptInterface
@@ -447,6 +662,7 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener {
     public void finishApp() {
         main.post(() -> {
             try { speech.destroy(); } catch (Exception ignored) { }
+            try { neural.shutdown(); } catch (Exception ignored) { }
             try { tts.shutdown(); } catch (Exception ignored) { }
             activity.finishAffinity();
         });

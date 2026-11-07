@@ -159,7 +159,7 @@ public class MainActivity extends Activity {
         super.onPause();
         try {
             if (speech != null) speech.cancel();
-            if (tts != null) tts.stop();
+            if (bridge != null) bridge.stopSpeaking();
         } catch (Exception ignored) { }
         if (web != null) web.evaluateJavascript("window.jarvisNative&&jarvisNative.onAppPause()", null);
     }

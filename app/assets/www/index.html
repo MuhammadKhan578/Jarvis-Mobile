@@ -39,7 +39,7 @@
       <p>Boliye ya type karein — apps khulenge, messages tayyar honge, sawal ka jawab milega.</p>
       <div class="welcome-tips">
         <span>“jarvis brave kholo”</span>
-        <span>“check my inbox”</span>
+        <span>“Play Store se Duolingo install karo”</span>
         <span>“YouTube par Tech Master kholo”</span>
         <span>“10 minute ka timer lagao”</span>
       </div>
@@ -135,6 +135,27 @@
     </div>
 
     <div class="set-group">
+      <div class="set-title">JARVIS VOICE (NEURAL)</div>
+      <div class="row">
+        <div>
+          <b>Natural Gemini voice</b>
+          <p class="hint">PC jaisi asli awaaz. Off karne par phone ki robotic voice chalegi.</p>
+        </div>
+        <label class="switch">
+          <input id="neuralToggle" type="checkbox">
+          <span></span>
+        </label>
+      </div>
+      <select id="neuralVoice" class="mini-select">
+        <option value="Charon">Charon · deep male</option>
+        <option value="Orus">Orus · firm male</option>
+        <option value="Fenrir">Fenrir · strong male</option>
+        <option value="Puck">Puck · bright male</option>
+      </select>
+      <div class="hint" id="neuralHint">Neural voice: Charon</div>
+    </div>
+
+    <div class="set-group">
       <div class="set-title">LANGUAGE</div>
       <div class="seg" id="langSeg">
         <button data-lang="both">BOTH</button>
@@ -182,6 +203,17 @@
     <div class="set-group">
       <div class="row">
         <div>
+          <b>Phone automation</b>
+          <p class="hint" id="autoState">Off hai — Play Store install aur screen taps ke liye on karein.</p>
+        </div>
+        <button id="autoBtn" class="mini-btn">Enable</button>
+      </div>
+      <p class="hint">Jarvis kisi bhi app ke buttons khud dabata hai — jaise Play Store par Install. Passwords nahi padhta.</p>
+    </div>
+
+    <div class="set-group">
+      <div class="row">
+        <div>
           <b>Memory</b>
           <p class="hint" id="memoryCount">—</p>
         </div>
@@ -191,8 +223,8 @@
 
     <div class="set-group about">
       <div class="set-title">ABOUT</div>
-      <p class="hint" id="aboutText">Jarvis Mobile 1.2.0</p>
-      <p class="hint">Android 14–17 · offline UI · Gemini cloud brain.</p>
+      <p class="hint" id="aboutText">Jarvis Mobile 1.3.0</p>
+      <p class="hint">Android 14–17 · offline UI · Gemini cloud brain · neural voice.</p>
     </div>
   </div>
 </section>
@@ -233,8 +265,8 @@
     <p class="onboard-sub">Just A Rather Very Intelligent System</p>
     <div class="onboard-points">
       <div><b>1</b><span>Mic button dabaiye aur Roman Urdu ya English mein boliye.</span></div>
-      <div><b>2</b><span>Jarvis apps khol sakta hai, messages tayyar kar sakta hai, sawal ka jawab de sakta hai.</span></div>
-      <div><b>3</b><span>Gmail inbox ke liye Settings mein Notification Access on karein.</span></div>
+      <div><b>2</b><span>Jarvis apps khol sakta hai, Play Store se app install kar sakta hai, aur sawal ka jawab de sakta hai.</span></div>
+      <div><b>3</b><span>Install aur screen taps ke liye Settings mein “Phone automation” on karein.</span></div>
       <div><b>4</b><span>Gemini API key sirf is phone par save hoti hai.</span></div>
     </div>
     <button id="onboardStart" class="start-btn">START JARVIS</button>
