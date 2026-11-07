@@ -1,0 +1,9 @@
+# Optional: embed a Gemini API key inside the APK for development only.
+#
+# Normal users do NOT need this file. On first launch the app asks for a key
+# and stores it in Android SharedPreferences, so it is remembered forever.
+#
+# To pre-seed a key (for your own private build), copy this file to
+#   app/assets/config.properties
+# and replace the placeholder below. Never commit that file.
+gemini_api_key=AIzaSyXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX

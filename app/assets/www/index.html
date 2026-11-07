@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#050B12">
+<meta name="color-scheme" content="dark">
+<title>J.A.R.V.I.S. Mobile</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+
+  <div class="bg-grid" aria-hidden="true"></div>
+  <div class="bg-glow" aria-hidden="true"></div>
+
+  <header class="hud-top">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true"><i></i></div>
+      <div class="brand-text">
+        <h1>J.A.R.V.I.S.</h1>
+        <p>MOBILE OS <span class="dot">·</span> <span id="connState">ONLINE</span></p>
+      </div>
+    </div>
+    <div class="top-actions">
+      <button id="btnMemory" class="icon-btn" aria-label="Memory" title="Memory">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3zm0 2.3L6 8.6v6.8l6 3.3 6-3.3V8.6l-6-3.3zM12 8a4 4 0 110 8 4 4 0 010-8z" fill="currentColor"/></svg>
+      </button>
+      <button id="btnSettings" class="icon-btn" aria-label="Settings" title="Settings">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path d="M19.4 13a7.8 7.8 0 000-2l2-1.6-2-3.4-2.4 1a7.7 7.7 0 00-1.7-1L15 3.5h-4L10.6 6a7.7 7.7 0 00-1.7 1l-2.4-1-2 3.4L6.6 11a7.8 7.8 0 000 2l-2 1.6 2 3.4 2.4-1a7.7 7.7 0 001.7 1l.4 2.5h4l.4-2.5a7.7 7.7 0 001.7-1l2.4 1 2-3.4-2-1.6zM13 15.5a3.5 3.5 0 110-7 3.5 3.5 0 010 7z" fill="currentColor"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main id="chat" class="chat" aria-live="polite">
+    <section id="welcome" class="welcome">
+      <div class="welcome-eyebrow">SYSTEM ONLINE · MOBILE EDITION</div>
+      <h2>Good to see you, sir.</h2>
+      <p>Boliye ya type karein — apps khulenge, messages tayyar honge, sawal ka jawab milega.</p>
+      <div class="welcome-tips">
+        <span>“jarvis brave kholo”</span>
+        <span>“check my inbox”</span>
+        <span>“YouTube par Tech Master kholo”</span>
+        <span>“10 minute ka timer lagao”</span>
+      </div>
+    </section>
+  </main>
+
+  <section class="voice-zone">
+    <button id="orb" class="orb" aria-label="Talk to Jarvis">
+      <span class="ring r1"></span>
+      <span class="ring r2"></span>
+      <span class="ring r3"></span>
+      <span class="orb-core">
+        <svg class="mic-glyph" viewBox="0 0 24 24" width="34" height="34" aria-hidden="true">
+          <path d="M12 15a3.5 3.5 0 003.5-3.5V6a3.5 3.5 0 10-7 0v5.5A3.5 3.5 0 0012 15z" fill="currentColor"/>
+          <path d="M6.5 11.5a5.5 5.5 0 0011 0M12 17v3.5M9 20.5h6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        </svg>
+      </span>
+    </button>
+    <div id="stateLabel" class="state-label">TAP TO SPEAK</div>
+    <div id="transcript" class="transcript"></div>
+  </section>
+
+  <div id="quick" class="quick" role="toolbar" aria-label="Quick actions">
+    <button data-quick="youtube">YouTube</button>
+    <button data-quick="gmail">Gmail</button>
+    <button data-quick="whatsapp">WhatsApp</button>
+    <button data-quick="maps">Maps</button>
+    <button data-quick="camera">Camera</button>
+    <button data-quick="flashlight">Light</button>
+  </div>
+
+  <div class="composer">
+    <input id="textInput" type="text" placeholder="Type or say: jarvis brave kholo" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="send">
+    <button id="btnSend" class="send-btn" aria-label="Send">
+      <svg viewBox="0 0 24 24" width="20" height="20"><path d="M3 20l18-8L3 4v6l12 2-12 2v6z" fill="currentColor"/></svg>
+    </button>
+  </div>
+
+  <div id="toast" class="toast" role="status"></div>
+</div>
+
+<!-- ============================ SETTINGS ============================ -->
+<div id="overlay" class="overlay hidden"></div>
+
+<section id="sheet" class="sheet hidden" aria-label="Settings">
+  <div class="sheet-head">
+    <div>
+      <h2>Settings</h2>
+      <p class="hint">Sab kuch sirf is phone par save hota hai.</p>
+    </div>
+    <button id="sheetClose" class="icon-btn" aria-label="Close">✕</button>
+  </div>
+  <div class="sheet-body">
+
+    <div class="set-group">
+      <div class="set-title">GEMINI API KEY</div>
+      <div class="key-row">
+        <input id="apiKeyInput" type="password" placeholder="AIza..." autocomplete="off" spellcheck="false">
+        <button id="saveKey" class="mini-btn">Save</button>
+      </div>
+      <div class="hint" id="keyHint">Key set nahi hai.</div>
+      <button id="openAiStudioBtn" class="link">Google AI Studio se free key banaiye</button>
+      <button id="removeKey" class="link danger">Remove key</button>
+    </div>
+
+    <div class="set-group">
+      <div class="set-title">BRAIN MODEL</div>
+      <div class="seg" id="modelSeg">
+        <button data-model="fast">FAST</button>
+        <button data-model="smart">SMART</button>
+      </div>
+      <div class="hint">Fast = 2–5 second jawab. Smart = mushkil sawal, thora slow.</div>
+    </div>
+
+    <div class="set-group">
+      <div class="set-title">VOICE</div>
+      <div class="seg" id="voiceSeg">
+        <button data-gender="male">MALE</button>
+        <button data-gender="female">FEMALE</button>
+      </div>
+      <div class="row tight">
+        <span id="lockState" class="pill">VOICE LOCK: ON</span>
+        <button id="lockBtn" class="mini-btn">Unlock</button>
+      </div>
+      <label class="range-label" for="rateRange">Speech rate <span id="rateVal">0.97</span></label>
+      <input id="rateRange" type="range" min="0.70" max="1.30" step="0.01" value="0.97">
+      <div class="btn-row">
+        <button id="testVoice" class="mini-btn">Test voice</button>
+        <button id="pickVoice" class="mini-btn">Installed voices</button>
+        <button id="ttsSettings" class="mini-btn">TTS settings</button>
+      </div>
+      <div class="hint" id="urduVoiceHint"></div>
+    </div>
+
+    <div class="set-group">
+      <div class="set-title">LANGUAGE</div>
+      <div class="seg" id="langSeg">
+        <button data-lang="both">BOTH</button>
+        <button data-lang="en">ENGLISH</button>
+        <button data-lang="ur">ROMAN URDU</button>
+      </div>
+      <div class="hint">Mic sirf English (India) sunta hai; Roman Urdu usi mein samajh aata hai.</div>
+    </div>
+
+    <div class="set-group">
+      <div class="row">
+        <div>
+          <b>“Hey Jarvis” hands-free</b>
+          <p class="hint">App khuli ho to har waqt sunta hai. Battery zyada lagti hai.</p>
+        </div>
+        <label class="switch">
+          <input id="handsFreeToggle" type="checkbox">
+          <span></span>
+        </label>
+      </div>
+      <div class="row">
+        <div>
+          <b>Wake word zaroori</b>
+          <p class="hint">Sirf “Jarvis” ke baad wali baat maane (hands-free mode).</p>
+        </div>
+        <label class="switch">
+          <input id="wakeToggle" type="checkbox">
+          <span></span>
+        </label>
+      </div>
+    </div>
+
+    <div class="set-group">
+      <div class="row">
+        <div>
+          <b>Gmail inbox (notifications)</b>
+          <p class="hint" id="notifState">Permission nahi hai.</p>
+        </div>
+        <button id="notifBtn" class="mini-btn">Enable</button>
+      </div>
+      <button id="clearNotifs" class="link">Saved notifications clear karein</button>
+      <p class="hint">Android par email read-mark automatically nahi hoti. Jarvis summary de kar Gmail khol sakta hai.</p>
+    </div>
+
+    <div class="set-group">
+      <div class="row">
+        <div>
+          <b>Memory</b>
+          <p class="hint" id="memoryCount">—</p>
+        </div>
+        <button id="openMemory" class="mini-btn">Open</button>
+      </div>
+    </div>
+
+    <div class="set-group about">
+      <div class="set-title">ABOUT</div>
+      <p class="hint" id="aboutText">Jarvis Mobile 1.2.0</p>
+      <p class="hint">Android 14–17 · offline UI · Gemini cloud brain.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ MEMORY ============================ -->
+<section id="memorySheet" class="sheet hidden" aria-label="Memory">
+  <div class="sheet-head">
+    <div><h2>Memory</h2><p class="hint">Jarvis in baaton ko yaad rakhta hai.</p></div>
+    <button id="memoryClose" class="icon-btn" aria-label="Close">✕</button>
+  </div>
+  <div class="sheet-body">
+    <div id="memoryList" class="memory-list"></div>
+    <div class="key-row">
+      <input id="memoryInput" type="text" placeholder="Nayi baat yaad rakho..." autocomplete="off">
+      <button id="memoryAdd" class="mini-btn">Add</button>
+    </div>
+    <button id="memoryClear" class="link danger">Sab memory clear karein</button>
+  </div>
+</section>
+
+<!-- ============================ VOICES ============================ -->
+<section id="voiceSheet" class="sheet hidden" aria-label="Installed voices">
+  <div class="sheet-head">
+    <div><h2>Installed voices</h2><p class="hint">Male voice pehle dikhayi gayi hai.</p></div>
+    <button id="voiceClose" class="icon-btn" aria-label="Close">✕</button>
+  </div>
+  <div class="sheet-body">
+    <button id="voiceAuto" class="mini-btn wide">AUTO (BEST MALE)</button>
+    <div id="voiceList" class="voice-list"></div>
+  </div>
+</section>
+
+<!-- ============================ ONBOARDING ============================ -->
+<div id="onboard" class="onboard hidden">
+  <div class="onboard-card">
+    <div class="onboard-logo"><i></i></div>
+    <h2>J.A.R.V.I.S.</h2>
+    <p class="onboard-sub">Just A Rather Very Intelligent System</p>
+    <div class="onboard-points">
+      <div><b>1</b><span>Mic button dabaiye aur Roman Urdu ya English mein boliye.</span></div>
+      <div><b>2</b><span>Jarvis apps khol sakta hai, messages tayyar kar sakta hai, sawal ka jawab de sakta hai.</span></div>
+      <div><b>3</b><span>Gmail inbox ke liye Settings mein Notification Access on karein.</span></div>
+      <div><b>4</b><span>Gemini API key sirf is phone par save hoti hai.</span></div>
+    </div>
+    <button id="onboardStart" class="start-btn">START JARVIS</button>
+    <p class="hint center">Android 14 – 17 · Gemini cloud brain</p>
+  </div>
+</div>
+
+<!-- ============================ FIRST-RUN API KEY ============================ -->
+<div id="keySetup" class="onboard key-setup hidden">
+  <div class="onboard-card">
+    <div class="onboard-logo"><i></i></div>
+    <h2>GEMINI API KEY</h2>
+    <p class="onboard-sub">Yeh key sirf aap ke phone par save hoti hai</p>
+
+    <div class="onboard-points">
+      <div><b>1</b><span>Google AI Studio kholiye aur apne Google account se sign in karein.</span></div>
+      <div><b>2</b><span>“Create API key” dabaiye — free key ban jayegi.</span></div>
+      <div><b>3</b><span>Key copy kar ke neeche paste karein. Jarvis ise hamesha yaad rakhega.</span></div>
+    </div>
+
+    <button id="openAiStudio" class="start-btn ai-btn">OPEN GOOGLE AI STUDIO</button>
+
+    <div class="key-row setup-row">
+      <input id="setupKeyInput" type="password" placeholder="AIza..." autocomplete="off" spellcheck="false">
+      <button id="setupKeySave" class="mini-btn">Save</button>
+    </div>
+    <div class="hint" id="setupKeyStatus">Key set nahi hai.</div>
+    <button id="setupKeyLater" class="link setup-skip">Baad mein (Settings se add karunga)</button>
+    <p class="hint center">Aap ki key kahin upload nahi hoti.</p>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

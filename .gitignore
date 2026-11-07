@@ -1,0 +1,26 @@
+# Build output
+build/
+*.apk
+*.apk.idsig
+*.idsig
+
+# Signing material - never commit
+keystore/
+*.keystore
+*.jks
+*.p12
+keystore.properties
+
+# Optional embedded key (users enter their own in the app)
+app/assets/config.properties
+
+# IDE / OS
+.gradle/
+.idea/
+*.iml
+local.properties
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
