@@ -89,18 +89,21 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
 
     @Override
     public void onTtsDone() {
+        releaseMic();
         callJs("window.jarvisNative&&jarvisNative.onTtsDone()");
     }
 
     @Override
     public void onTtsError(String message) {
         neuralActive = false;
+        releaseMic();
         callJs("window.jarvisNative&&jarvisNative.onTtsError(" + q(message) + ")");
     }
 
     @Override
     public void onNeuralDone() {
         neuralActive = false;
+        releaseMic();
         callJs("window.jarvisNative&&jarvisNative.onTtsDone()");
     }
 
@@ -110,11 +113,17 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
         boolean played = neural.hasPlayedAny();
         neuralActive = false;
         if (played) {
+            releaseMic();
             callJs("window.jarvisNative&&jarvisNative.onTtsDone()");
             return;
         }
         Log.w(TAG, "Neural voice failed, using system voice: " + message);
         tts.speak(pendingRoman, pendingUrdu);
+    }
+
+    /** The microphone stays off while Jarvis is thinking or talking. */
+    private void releaseMic() {
+        try { if (speech != null) speech.setHeld(false); } catch (Exception ignored) { }
     }
 
     /**
@@ -126,7 +135,9 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
     public void speak(String roman, String urdu) {
         pendingRoman = roman == null ? "" : roman.trim();
         pendingUrdu = urdu == null ? "" : urdu.trim();
+        try { if (speech != null) speech.setHeld(true); } catch (Exception ignored) { }
         if (pendingRoman.isEmpty() && pendingUrdu.isEmpty()) {
+            releaseMic();
             callJs("window.jarvisNative&&jarvisNative.onTtsDone()");
             return;
         }
@@ -149,6 +160,78 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
         neural.stop();
         neuralActive = false;
         tts.stop();
+        releaseMic();
+    }
+
+    // ------------------------------------------------- background always-on
+
+    /**
+     * Turns the background mode on/off. When on, a foreground service keeps the
+     * process alive and SpeechEngine restarts the microphone natively, so
+     * "Hey Jarvis" works with the app closed on screen, even with the phone locked.
+     */
+    @JavascriptInterface
+    public void setAlwaysOn(boolean on) {
+        prefs.edit().putBoolean(JarvisService.KEY_ALWAYS_ON, on).apply();
+        if (on) {
+            JarvisService.start(activity);
+        } else {
+            JarvisService.stop(activity);
+        }
+        try { if (speech != null) speech.setAutoLoop(on); } catch (Exception ignored) { }
+        if (!on) releaseMic();
+    }
+
+    @JavascriptInterface
+    public boolean isAlwaysOn() {
+        return prefs.getBoolean(JarvisService.KEY_ALWAYS_ON, true);
+    }
+
+    /** Native mic loop: JS timers are frozen in the background, this is not. */
+    @JavascriptInterface
+    public void setAutoListen(boolean on) {
+        try { if (speech != null) speech.setAutoLoop(on); } catch (Exception ignored) { }
+    }
+
+    @JavascriptInterface
+    public void holdListening(boolean hold) {
+        try { if (speech != null) speech.setHeld(hold); } catch (Exception ignored) { }
+    }
+
+    @JavascriptInterface
+    public boolean isHoldingMic() {
+        try { return speech != null && speech.isHeld(); } catch (Exception e) { return false; }
+    }
+
+    @JavascriptInterface
+    public void openServiceSettings() {
+        main.post(() -> {
+            try {
+                Intent i = new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+                i.setData(Uri.parse("package:" + activity.getPackageName()));
+                activity.startActivity(i);
+            } catch (Exception ignored) { }
+        });
+    }
+
+    /** Caches the phrases Jarvis says most often so audio starts instantly. */
+    @JavascriptInterface
+    public void warmVoice() {
+        try {
+            if (!prefs.getBoolean(KEY_NEURAL, true)) return;
+            String key = readKey();
+            if (key.isEmpty()) return;
+            String voice = prefs.getString(KEY_NEURAL_VOICE, "Charon");
+            List<String> warm = new ArrayList<>();
+            warm.add("Ji sir?");
+            warm.add("Ji sir, boliye.");
+            warm.add("Ho gaya, sir.");
+            warm.add("Theek hai sir.");
+            warm.add("Sun raha hoon, sir.");
+            warm.add("Ek second sir.");
+            warm.add("Khol diya, sir.");
+            neural.prefetch(warm, voice, key);
+        } catch (Exception ignored) { }
     }
 
     /** Urdu script sounds right with the neural voice; Roman text uses English. */
@@ -406,6 +489,8 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
                     new String[]{Manifest.permission.RECORD_AUDIO}, MainActivity.REQ_MIC));
             return "permission";
         }
+        // A manual start always wins over the "thinking/speaking" hold.
+        try { speech.setHeld(false); } catch (Exception ignored) { }
         speech.start();
         return "ok";
     }
@@ -542,7 +627,7 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
                     q("{\"error\":{\"message\":\"BAD_MODEL\",\"status\":\"BAD_MODEL\"}}") + ")");
             return;
         }
-        final int readTimeout = Math.max(8000, Math.min(30000, timeoutMs));
+        final int readTimeout = Math.max(6000, Math.min(20000, timeoutMs));
         new Thread(() -> {
             HttpURLConnection conn = null;
             try {
@@ -550,7 +635,7 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
                         + model + ":generateContent");
                 conn = (HttpURLConnection) url.openConnection();
                 conn.setRequestMethod("POST");
-                conn.setConnectTimeout(12000);
+                conn.setConnectTimeout(8000);
                 conn.setReadTimeout(readTimeout);
                 conn.setDoOutput(true);
                 conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
@@ -606,7 +691,7 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
 
     @JavascriptInterface
     public String version() {
-        return "1.3.0";
+        return "1.4.0";
     }
 
     @JavascriptInterface
@@ -661,6 +746,8 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
     @JavascriptInterface
     public void finishApp() {
         main.post(() -> {
+            try { prefs.edit().putBoolean(JarvisService.KEY_ALWAYS_ON, false).apply(); } catch (Exception ignored) { }
+            try { JarvisService.stop(activity); } catch (Exception ignored) { }
             try { speech.destroy(); } catch (Exception ignored) { }
             try { neural.shutdown(); } catch (Exception ignored) { }
             try { tts.shutdown(); } catch (Exception ignored) { }

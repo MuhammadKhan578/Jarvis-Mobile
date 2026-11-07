@@ -73,6 +73,20 @@ public class SpeechEngine {
     private volatile boolean listening = false;
     private boolean destroyed = false;
 
+    /**
+     * Background ("always online") mode.
+     *
+     * When the WebView is hidden Android throttles its timers, so the JS layer
+     * cannot reliably restart the recognizer. In auto-loop mode the native side
+     * re-arms the microphone itself, which is what keeps "Hey Jarvis" working
+     * with the screen off.
+     */
+    private volatile boolean autoLoop = false;
+    /** Set while Jarvis is thinking or speaking: no mic restarts during that. */
+    private volatile boolean held = false;
+    private volatile boolean blockedByPermission = false;
+    private Runnable restartRunnable;
+
     /** Every distinct transcript heard during the current utterance. */
     private final LinkedHashSet<String> heard = new LinkedHashSet<>();
     private String lastPartial = "";
@@ -111,6 +125,9 @@ public class SpeechEngine {
                 }
                 @Override public void onError(int error) {
                     listening = false;
+                    if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
+                        blockedByPermission = true;
+                    }
                     // A partial transcript is better than losing the command.
                     if ((error == SpeechRecognizer.ERROR_NO_MATCH
                             || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT)
@@ -119,10 +136,12 @@ public class SpeechEngine {
                         if (!all.contains(lastPartial)) all.add(0, lastPartial);
                         android.util.Log.d("JarvisMobile", "STT recover partial: " + lastPartial);
                         if (listener != null) listener.onSpeechFinal(lastPartial, all);
+                        scheduleRestart(350);
                         return;
                     }
                     android.util.Log.w("JarvisMobile", "STT error " + error + " " + errorText(error));
                     if (listener != null) listener.onSpeechError(error, errorText(error));
+                    scheduleRestart(error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY ? 900 : 450);
                 }
                 @Override public void onResults(Bundle results) {
                     listening = false;
@@ -135,6 +154,7 @@ public class SpeechEngine {
                                 "Awaaz mili lekin alfaz samajh nahi aaye.");
                         else listener.onSpeechFinal(text, all);
                     }
+                    scheduleRestart(350);
                 }
                 @Override public void onPartialResults(Bundle partialResults) {
                     String text = firstResult(partialResults);
@@ -201,6 +221,11 @@ public class SpeechEngine {
                 return;
             }
             if (listening) return;
+            if (blockedByPermission) {
+                if (context.checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)
+                        != android.content.pm.PackageManager.PERMISSION_GRANTED) return;
+                blockedByPermission = false;
+            }
             heard.clear();
             lastPartial = "";
             try {
@@ -213,10 +238,11 @@ public class SpeechEngine {
                 intent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 8);
                 intent.putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, false);
                 intent.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, context.getPackageName());
-                // Long enough for a natural pause; short enough to stay responsive.
-                intent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2500L);
-                intent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 2000L);
-                intent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 1000L);
+                // Short windows: a voice assistant must answer immediately.
+                // 1.2s of silence is enough to know the sentence finished.
+                intent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1200L);
+                intent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1000L);
+                intent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 650L);
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     intent.putExtra(RecognizerIntent.EXTRA_BIASING_STRINGS, new ArrayList<>(Arrays.asList(BIAS_WORDS)));
                 }
@@ -230,6 +256,54 @@ public class SpeechEngine {
         });
     }
 
+    // ------------------------------------------------- background listen loop
+
+    /** Native auto-restart of the microphone (used while the app is in background). */
+    public void setAutoLoop(boolean on) {
+        autoLoop = on;
+        if (on) scheduleRestart(200);
+        else cancelRestart();
+    }
+
+    public boolean isAutoLoop() {
+        return autoLoop;
+    }
+
+    /** Pause the loop while Jarvis is thinking or speaking, then resume. */
+    public void setHeld(boolean value) {
+        held = value;
+        if (value) {
+            cancelRestart();
+        } else if (autoLoop) {
+            scheduleRestart(250);
+        }
+    }
+
+    public boolean isHeld() {
+        return held;
+    }
+
+    private void cancelRestart() {
+        if (restartRunnable != null) {
+            main.removeCallbacks(restartRunnable);
+            restartRunnable = null;
+        }
+    }
+
+    private void scheduleRestart(long delayMs) {
+        if (!autoLoop || held || destroyed) return;
+        cancelRestart();
+        restartRunnable = new Runnable() {
+            @Override
+            public void run() {
+                restartRunnable = null;
+                if (!autoLoop || held || destroyed || listening) return;
+                start();
+            }
+        };
+        main.postDelayed(restartRunnable, Math.max(150, delayMs));
+    }
+
     /** Stops but still delivers the final result. */
     public void stop() {
         main.post(() -> {
@@ -240,6 +314,7 @@ public class SpeechEngine {
     /** Stops immediately and throws away any pending result. */
     public void cancel() {
         main.post(() -> {
+            cancelRestart();
             try { if (recognizer != null) recognizer.cancel(); } catch (Exception ignored) { }
             listening = false;
             heard.clear();
@@ -249,7 +324,9 @@ public class SpeechEngine {
 
     public void destroy() {
         destroyed = true;
+        autoLoop = false;
         main.post(() -> {
+            cancelRestart();
             try { if (recognizer != null) { recognizer.cancel(); recognizer.destroy(); } } catch (Exception ignored) { }
             recognizer = null;
             listening = false;

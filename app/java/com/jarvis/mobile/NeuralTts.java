@@ -174,6 +174,52 @@ public class NeuralTts {
         try { pool.shutdownNow(); } catch (Exception ignored) { }
     }
 
+    /**
+     * Warms the on-disk cache for phrases that Jarvis says all the time
+     * ("Ji sir?", "Ho gaya, sir.").  Runs quietly in the background and never
+     * plays anything, so the first real reply starts instantly.
+     */
+    public void prefetch(List<String> phrases, String voiceName, String key) {
+        final List<String> list = sanitize(phrases);
+        final String v = (voiceName == null || voiceName.trim().isEmpty()) ? "Charon" : voiceName.trim();
+        final String k = key == null ? "" : key.trim();
+        if (k.isEmpty() || list.isEmpty()) return;
+        for (final String text : list) {
+            pool.execute(() -> {
+                try {
+                    File cached = new File(ttsDir(), sha1(v + "|" + text) + ".wav");
+                    if (cached.exists() && cached.length() > 1000) return;
+                    byte[] audio = null;
+                    for (String model : MODELS) {
+                        try {
+                            audio = requestAudio(model, text, v, k);
+                            if (audio != null && audio.length > 1000) break;
+                        } catch (Exception ignored) { }
+                    }
+                    if (audio == null || audio.length <= 1000) return;
+                    store(v, text, audio);
+                } catch (Exception ignored) { }
+            });
+        }
+    }
+
+    private void store(String voiceName, String text, byte[] audio) throws Exception {
+        File dir = ttsDir();
+        File out = new File(dir, sha1(voiceName + "|" + text) + ".wav");
+        File tmp = new File(dir, out.getName() + ".part");
+        try (FileOutputStream fos = new FileOutputStream(tmp)) {
+            fos.write(audio);
+        }
+        if (!tmp.renameTo(out)) {
+            try (FileOutputStream fos = new FileOutputStream(out)) {
+                fos.write(audio);
+            }
+            //noinspection ResultOfMethodCallIgnored
+            tmp.delete();
+        }
+        pruneCache(dir);
+    }
+
     // ------------------------------------------------------------- synthesis
 
     private void synthesize(int gen, int index, String text) {
@@ -185,10 +231,16 @@ public class NeuralTts {
             }
             byte[] audio = null;
             Exception last = null;
+            final String useVoice;
+            final String useKey;
+            synchronized (lock) {
+                useVoice = voice;
+                useKey = apiKey;
+            }
             for (String model : MODELS) {
                 if (!isCurrent(gen)) return;
                 try {
-                    audio = requestAudio(model, text);
+                    audio = requestAudio(model, text, useVoice, useKey);
                     if (audio != null && audio.length > 1000) break;
                 } catch (Exception e) {
                     last = e;
@@ -199,33 +251,20 @@ public class NeuralTts {
                 fail(gen, last == null ? "Neural voice ne audio nahi diya." : last.getMessage());
                 return;
             }
-            File dir = ttsDir();
-            File out = new File(dir, sha1(voice + "|" + text) + ".wav");
-            File tmp = new File(dir, out.getName() + ".part");
-            try (FileOutputStream fos = new FileOutputStream(tmp)) {
-                fos.write(audio);
-            }
-            if (!tmp.renameTo(out)) {
-                try (FileOutputStream fos = new FileOutputStream(out)) {
-                    fos.write(audio);
-                }
-                //noinspection ResultOfMethodCallIgnored
-                tmp.delete();
-            }
-            pruneCache(dir);
-            onFileReady(gen, index, out);
+            store(useVoice, text, audio);
+            onFileReady(gen, index, new File(ttsDir(), sha1(useVoice + "|" + text) + ".wav"));
         } catch (Exception e) {
             fail(gen, e.getMessage() == null ? e.toString() : e.getMessage());
         }
     }
 
     /** Returns a playable WAV file (wraps raw PCM if the model returns l16). */
-    private byte[] requestAudio(String model, String text) throws Exception {
+    private byte[] requestAudio(String model, String text, String voiceName, String key) throws Exception {
         JSONObject part = new JSONObject().put("text", text);
         JSONObject content = new JSONObject()
                 .put("parts", new JSONArray().put(part));
         JSONObject voiceConfig = new JSONObject()
-                .put("prebuiltVoiceConfig", new JSONObject().put("voiceName", voice));
+                .put("prebuiltVoiceConfig", new JSONObject().put("voiceName", voiceName));
         JSONObject speechConfig = new JSONObject().put("voiceConfig", voiceConfig);
         JSONObject generationConfig = new JSONObject()
                 .put("responseModalities", new JSONArray().put("AUDIO"))
@@ -244,7 +283,7 @@ public class NeuralTts {
             conn.setReadTimeout(IO_TIMEOUT_MS);
             conn.setDoOutput(true);
             conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-            conn.setRequestProperty("x-goog-api-key", apiKey);
+            conn.setRequestProperty("x-goog-api-key", key);
             byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
             conn.setFixedLengthStreamingMode(body.length);
             try (OutputStream os = conn.getOutputStream()) {

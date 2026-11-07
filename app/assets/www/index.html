@@ -169,10 +169,20 @@
       <div class="row">
         <div>
           <b>“Hey Jarvis” hands-free</b>
-          <p class="hint">App khuli ho to har waqt sunta hai. Battery zyada lagti hai.</p>
+          <p class="hint">Bina tap kiye bolein. Background mode ke saath hamesha sunta hai.</p>
         </div>
         <label class="switch">
           <input id="handsFreeToggle" type="checkbox">
+          <span></span>
+        </label>
+      </div>
+      <div class="row">
+        <div>
+          <b>Always online (background)</b>
+          <p class="hint" id="bgState">ON — app band karne ke baad bhi “Hey Jarvis” sunta rahega (notification rehti hai).</p>
+        </div>
+        <label class="switch">
+          <input id="alwaysOnToggle" type="checkbox">
           <span></span>
         </label>
       </div>
@@ -223,8 +233,8 @@
 
     <div class="set-group about">
       <div class="set-title">ABOUT</div>
-      <p class="hint" id="aboutText">Jarvis Mobile 1.3.0</p>
-      <p class="hint">Android 14–17 · offline UI · Gemini cloud brain · neural voice.</p>
+      <p class="hint" id="aboutText">Jarvis Mobile 1.4.0</p>
+      <p class="hint">Android 14–17 · background always-on · Gemini cloud brain · neural voice.</p>
     </div>
   </div>
 </section>

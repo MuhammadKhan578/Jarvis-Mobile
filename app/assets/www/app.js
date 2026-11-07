@@ -118,7 +118,7 @@ const Native = window.Android || {
   },
   executeTool: () => JSON.stringify({ ok: false, message: 'Native tools available nahi hain.' }),
   getStatus: () => JSON.stringify({ ok: true, data: { online: navigator.onLine, battery: -1, network: 'unknown' } }),
-  version: () => '1.2.0-web',
+  version: () => '1.4.0-web',
   deviceSummary: () => 'Browser',
   toast: (m) => window.jarvisToast && window.jarvisToast(m),
   vibrate: () => { },
@@ -129,6 +129,13 @@ const Native = window.Android || {
   openTtsSettings: () => { },
   setNeuralPrefs: () => { },
   getNeuralPrefs: () => JSON.stringify({ enabled: true, voice: 'Charon' }),
+  setAlwaysOn: () => { },
+  isAlwaysOn: () => false,
+  setAutoListen: () => { },
+  holdListening: () => { },
+  isHoldingMic: () => false,
+  openServiceSettings: () => { },
+  warmVoice: () => { },
   hasAutomation: () => false,
   openAutomationSettings: () => { },
   startInstall: (id, name) => {
@@ -153,7 +160,8 @@ const DEFAULTS = {
   voiceName: '',
   neuralVoice: true,
   neuralVoiceName: 'Charon',
-  handsFree: false,
+  handsFree: true,
+  alwaysOn: true,
   wakeRequired: true,
   onboarded: false
 };
@@ -256,6 +264,30 @@ let toastTimer = null;
 let reqSeq = 0;
 const pendingRequests = {};
 
+/* Background mode: Android service keeps us alive, native code restarts the mic. */
+function bgMode() {
+  return settings.alwaysOn !== false && settings.handsFree !== false;
+}
+
+function applyBackground(on) {
+  settings.alwaysOn = !!on;
+  saveSettings();
+  try {
+    Native.setAlwaysOn(!!on);
+    Native.setAutoListen(bgMode());
+    Native.holdListening(false);
+  } catch (e) { }
+  // The service holds the CPU awake; the screen itself may sleep.
+  try { Native.keepAwake(false); } catch (e) { }
+  if (!on) {
+    try { Native.cancelListening(); } catch (e) { }
+    clearTimeout(listenTimer);
+    if (state === 'listening') setState('idle');
+  } else if (settings.handsFree && state === 'idle' && !busy) {
+    startListening(false);
+  }
+}
+
 /* -------------------------------------------------------------------- DOM */
 let chatEl, welcomeEl, orbEl, stateLabelEl, transcriptEl, toastEl;
 
@@ -301,6 +333,13 @@ function finishSpeaking() {
   clearTimeout(speakSafety);
   if (state !== 'speaking') return;
   setState('idle');
+  // Native speech engine released the mic on TTS completion; in background
+  // mode it restarts the recognizer by itself, so no JS timer is needed.
+  try { Native.holdListening(false); } catch (e) { }
+  if (bgMode()) {
+    try { Native.setAutoListen(true); } catch (e) { }
+    return;
+  }
   if (settings.handsFree && appActive) scheduleListen(600);
 }
 
@@ -310,6 +349,7 @@ function stopEverything() {
   micStartPending = false;
   try { Native.stopSpeaking(); } catch (e) { }
   try { Native.cancelListening(); } catch (e) { }
+  try { Native.holdListening(false); } catch (e) { }
   setState('idle');
   transcript('');
 }
@@ -335,6 +375,12 @@ function armListenSafety(ms) {
 function scheduleListen(delay) {
   clearTimeout(listenTimer);
   if (!settings.handsFree || !appActive) return;
+  // In background mode the native loop owns the microphone. JS timers are
+  // frozen while the app is hidden, so trusting them here would stop listening.
+  if (bgMode()) {
+    try { Native.setAutoListen(true); Native.holdListening(false); } catch (e) { }
+    return;
+  }
   listenTimer = setTimeout(() => {
     if (!appActive || !settings.handsFree || state !== 'idle' || busy) return;
     startListening(false);
@@ -446,7 +492,10 @@ function respond(roman, urdu, opts) {
   try { console.log('JARVIS_REPLY ' + JSON.stringify({ roman: roman, urdu: urdu })); } catch (e) { }
   try { Native.log('REPLY ' + roman); } catch (e) { }
   if (o.silent !== true) speak(roman, urdu);
-  else if (settings.handsFree) scheduleListen(700);
+  else {
+    try { Native.holdListening(false); } catch (e) { }
+    if (settings.handsFree) scheduleListen(700);
+  }
 }
 
 function trimHistory() {
@@ -476,7 +525,9 @@ function updateConnState() {
     el.classList.add('offline');
     return;
   }
-  el.textContent = online ? 'ONLINE' : 'OFFLINE';
+  el.textContent = online
+    ? (settings.alwaysOn !== false ? 'ONLINE · BG' : 'ONLINE')
+    : 'OFFLINE';
   el.classList.toggle('offline', !online);
 }
 
@@ -1216,26 +1267,26 @@ function buildSystemPrompt() {
   });
 
   return [
-    'You are J.A.R.V.I.S. ("Jarvis"), the user\'s personal Android assistant — the same Jarvis as on their PC, now living inside their phone. Call the user "sir".',
-    'PERSONALITY: warm, quick-witted, calm and extremely capable. You have real opinions: when asked, give ONE clear recommendation with a short reason, never "it depends". You may ask one short follow-up question when it truly helps.',
-    'You are the MOBILE version: you control this phone, not a PC. If something is PC-only (Word, desktop files, PC apps), say it in one short line and offer the phone alternative.',
-    'THINK FIRST: the user speaks English and Roman Urdu, and speech recognition makes mistakes ("jaadui", "travis" = Jarvis; wrong app or song names). Work out the real intent from context. Resolve "isko", "woh", "yahan" from the conversation and from ui_dump when the user is talking about the screen.',
-    'ACT, DO NOT LECTURE: use tools immediately and chain as many as needed until the WHOLE request is done. Never reply with instructions telling the user to do the remaining steps themselves. If a tool fails, try a different approach, then report the real reason in one short sentence.',
-    'HONESTY (very important): claim a task is done only when the tool result has ok:true. If the result has needs_user_action:true, say it is ready and what to tap. Never invent emails, messages, alarms, installs or subscriptions. YouTube subscribe and Gmail "mark as read" cannot be automated.',
-    'PHONE POWERS: open apps; Play Store search and REAL install (install_app taps Install and Open itself when Phone automation is on); read the current screen (ui_dump); tap any visible button or label (ui_click); type into fields (ui_type); Back/Home/Recents/Notifications (system_action); YouTube search; WhatsApp/SMS/email drafts; alarms; timers; maps; volume; torch; battery/network status; clipboard; long-term memory.',
-    'INSTALL FLOW: for "Duolingo install karo" or "Play Store se X install karo" call install_app ONCE with the exact app name. Do not also call open_play_store. Wait for its result, then report exactly what happened. If automation is off, the result says so: tell the user in one line to enable Settings > Phone automation, and that Play Store is already open for a manual tap.',
+    'You are J.A.R.V.I.S. ("Jarvis"), the user\'s personal Android assistant — the same Jarvis as on their PC, now inside their phone. Call the user "sir".',
+    'PERSONALITY: warm, quick-witted, calm, extremely capable. When asked for advice give ONE clear recommendation with a short reason, never "it depends". One short follow-up question only if it truly helps.',
+    'You are the MOBILE version: you control this phone, not a PC. For PC-only things (desktop files, Word) say it in one short line and offer the phone alternative.',
+    'THINK FIRST: the user speaks English and Roman Urdu and speech recognition makes mistakes ("jaadui", "travis" = Jarvis; wrong app/song names). Infer the real intent. Resolve "isko", "woh", "yahan" from the conversation and from ui_dump.',
+    'ACT, DO NOT LECTURE: use tools immediately and chain them until the WHOLE request is done. Never tell the user to do the remaining steps themselves. If a tool fails, try another way, then report the real reason in one short sentence.',
+    'HONESTY: say a task is done only when a tool returned ok:true. If needs_user_action:true, say what to tap. Never invent emails, messages, alarms, installs or subscriptions. YouTube subscribe and Gmail mark-as-read cannot be automated.',
+    'PHONE POWERS: open apps; Play Store search and REAL install (install_app taps Install and Open when Phone automation is on); read screen (ui_dump); tap (ui_click); type (ui_type); Back/Home/Recents/Notifications (system_action); YouTube search; WhatsApp/SMS/email drafts; alarms; timers; maps; volume; torch; battery/network; clipboard; memory.',
+    'INSTALL: for "X install karo" call install_app ONCE with the exact app name, not open_play_store too. Wait for the result and report exactly what happened.',
     'AUTOMATION: ' + (automation
-      ? 'Phone automation is ON — you can tap through other apps yourself. Use ui_dump to see each screen before tapping.'
-      : 'Phone automation is OFF — ui_click / ui_type / ui_dump / system_action and full install will ask the user to enable it. App opens, Play Store search and normal tools still work.'),
-    'MEMORY: when the user shares something lasting or says "yaad rakho", call remember with a short English fact. Use saved facts naturally; never read the list out.',
-    'STYLE: everything is spoken out loud. For actions: 1-2 short sentences. For questions: up to 4 short spoken sentences. No lists, no markdown, no emojis, no stage directions.',
+      ? 'ON — you can tap through other apps. Use ui_dump before tapping.'
+      : 'OFF — ui_click / ui_type / ui_dump / system_action and full install will ask the user to enable it. App opens, Play Store search and normal tools still work.'),
+    'MEMORY: when the user shares something lasting or says "yaad rakho", call remember with a short English fact. Never read the list out.',
+    'SPEED AND STYLE: your answer is spoken aloud. Answer the question asked, do not pad. Actions: 1-2 short sentences. Questions: up to 4 short sentences. No lists, markdown, emojis or stage directions.',
     'MEMORY (about the user):',
     facts,
     'LANGUAGE: ' + langLine,
-    'CURRENT DATE AND TIME: ' + timeText,
-    'OUTPUT FORMAT: reply with exactly two lines and nothing else:',
-    'ROMAN: <your reply in English or Roman Urdu as the language rule says>',
-    'URDU: <the same reply written in Urdu script>'
+    'NOW: ' + timeText,
+    'OUTPUT: exactly two lines, nothing else:',
+    'ROMAN: <reply in English or Roman Urdu as the language rule says>',
+    'URDU: <the same reply in Urdu script>'
   ].join('\n');
 }
 
@@ -1283,11 +1334,11 @@ function geminiRequest(model, payload) {
         err.timeout = true;
         reject(err);
       }
-    }, 22000);
+    }, 13000);
     pendingRequests[id] = { resolve, reject, timer };
     try { Native.log('HTTP_SEND ' + id + ' ' + model); } catch (e) { }
     try {
-      Native.httpGemini(id, model, JSON.stringify(payload), 18000);
+      Native.httpGemini(id, model, JSON.stringify(payload), 12000);
     } catch (e) {
       delete pendingRequests[id];
       clearTimeout(timer);
@@ -1316,7 +1367,7 @@ async function toolLoop(model, baseContents, systemPrompt) {
       systemInstruction: { parts: [{ text: systemPrompt }] },
       contents,
       tools: [{ functionDeclarations: toolDeclarations() }],
-      generationConfig: { temperature: 0.55, maxOutputTokens: 1600 }
+      generationConfig: { temperature: 0.55, maxOutputTokens: 900 }
     };
     const raw = await geminiRequest(model, payload);
     let data;
@@ -1355,9 +1406,11 @@ async function toolLoop(model, baseContents, systemPrompt) {
 }
 
 async function askBrain(userText) {
-  const contents = history.slice(-20).map(item => ({
+  // Short history keeps the request small: a big prompt was the main reason
+  // replies took several seconds. 10 turns is plenty of context for speech.
+  const contents = history.slice(-10).map(item => ({
     role: item.role === 'user' ? 'user' : 'model',
-    parts: [{ text: item.text }]
+    parts: [{ text: String(item.text || '').slice(0, 700) }]
   }));
   if (!contents.length || contents[contents.length - 1].role !== 'user') {
     contents.push({ role: 'user', parts: [{ text: userText }] });
@@ -1368,7 +1421,7 @@ async function askBrain(userText) {
   let last = null;
 
   for (const model of models) {
-    if (Date.now() - started > 26000) break;
+    if (Date.now() - started > 18000) break;
     try { Native.log('ASK ' + model); } catch (e) { }
     try {
       return await toolLoop(model, contents, systemPrompt);
@@ -1432,6 +1485,8 @@ async function handleCommand(raw) {
 
   busy = true;
   setState('thinking');
+  // No mic restarts while the brain is working or the voice is answering.
+  try { Native.holdListening(true); } catch (e) { }
   try {
     const reply = await askBrain(text);
     const parsed = parseReply(reply);
@@ -1442,6 +1497,9 @@ async function handleCommand(raw) {
     errorReply(e);
   } finally {
     busy = false;
+    if (state !== 'speaking') {
+      try { Native.holdListening(false); } catch (e) { }
+    }
   }
 }
 
@@ -1496,6 +1554,14 @@ function renderSettings() {
   if (hands) hands.checked = !!settings.handsFree;
   const wake = $('#wakeToggle');
   if (wake) wake.checked = !!settings.wakeRequired;
+  const bg = $('#alwaysOnToggle');
+  if (bg) bg.checked = settings.alwaysOn !== false;
+  const bgState = $('#bgState');
+  if (bgState) {
+    bgState.textContent = settings.alwaysOn !== false
+      ? 'ON — app band karne ke baad bhi “Hey Jarvis” sunta rahega (notification rehti hai).'
+      : 'Off — sirf app khuli ho tab sunta hai.';
+  }
 
   const keyHint = $('#keyHint');
   if (keyHint) {
@@ -1611,6 +1677,7 @@ function saveSetupKey() {
   renderSettings();
   updateConnState();
   try { Native.requestMicPermission(); } catch (e) { }
+  try { Native.warmVoice(); } catch (e) { }
   setTimeout(() => {
     respond(LINES.welcome.roman, LINES.welcome.urdu);
     if (settings.handsFree && state === 'idle') scheduleListen(700);
@@ -1837,7 +1904,14 @@ window.jarvisNative = {
     if (state === 'speaking') finishSpeaking();
   },
   onSpeechReady() {
-    if (state === 'listening') stateLabelEl.textContent = 'BOLIYE...';
+    // A background restart of the recognizer happens inside native code, so
+    // the UI has to follow it here; otherwise the transcript is thrown away.
+    if (state !== 'listening') {
+      setState('listening');
+      transcript('');
+    }
+    if (stateLabelEl) stateLabelEl.textContent = 'BOLIYE...';
+    armListenSafety(15000);
   },
   onSpeechPartial(text) {
     if (state === 'listening') transcript(text);
@@ -1879,6 +1953,7 @@ window.jarvisNative = {
       return;
     }
     handleCommand(command);
+    if (bgMode()) pushToTalk = false;
   },
   onSpeechEnd() {
     if (state === 'listening') stateLabelEl.textContent = 'PROCESSING...';
@@ -1939,6 +2014,18 @@ window.jarvisNative = {
     return false;
   },
   onAppPause() {
+    // Background mode: keep listening and keep talking. Only a real "always
+    // online OFF" setting stops the assistant when the app leaves the screen.
+    if (bgMode()) {
+      appActive = true;
+      pushToTalk = false;
+      try {
+        Native.setAlwaysOn(true);
+        Native.setAutoListen(true);
+        Native.holdListening(state === 'speaking' || state === 'thinking');
+      } catch (e) { }
+      return;
+    }
     appActive = false;
     clearTimeout(listenTimer);
     clearListenSafety();
@@ -1948,6 +2035,18 @@ window.jarvisNative = {
     appActive = true;
     updateConnState();
     renderSettings();
+    if (bgMode()) {
+      try {
+        Native.setAlwaysOn(true);
+        Native.setAutoListen(true);
+      } catch (e) { }
+      if (settings.onboarded && state === 'idle' && !busy) {
+        try { Native.holdListening(false); Native.startListening(); } catch (e) { }
+        setState('listening');
+        armListenSafety(15000);
+      }
+      return;
+    }
     if (settings.handsFree && settings.onboarded && state === 'idle') scheduleListen(900);
   }
 };
@@ -2047,16 +2146,26 @@ function bindEvents() {
   $('#handsFreeToggle').addEventListener('change', e => {
     settings.handsFree = !!e.target.checked;
     saveSettings();
-    try { Native.keepAwake(settings.handsFree); } catch (err) { }
+    try {
+      Native.setAutoListen(bgMode());
+      Native.setAlwaysOn(settings.alwaysOn !== false);
+    } catch (err) { }
     if (settings.handsFree) {
       toast('Hands-free ON. “Hey Jarvis” bolein.');
-      if (state === 'idle') scheduleListen(500);
+      try { Native.holdListening(false); } catch (err) { }
+      if (state === 'idle') startListening(false);
     } else {
       clearTimeout(listenTimer);
-      try { Native.cancelListening(); } catch (err) { }
+      try { Native.setAutoListen(false); Native.cancelListening(); } catch (err) { }
       if (state === 'listening') setState('idle');
       toast('Hands-free OFF.');
     }
+  });
+  const alwaysOn = $('#alwaysOnToggle');
+  if (alwaysOn) alwaysOn.addEventListener('change', e => {
+    applyBackground(!!e.target.checked);
+    renderSettings();
+    toast(settings.alwaysOn ? 'Background mode ON — hamesha online.' : 'Background mode OFF.');
   });
   $('#wakeToggle').addEventListener('change', e => {
     settings.wakeRequired = !!e.target.checked;
@@ -2075,6 +2184,7 @@ function bindEvents() {
       hideKeySetup();
       renderSettings();
       updateConnState();
+      try { Native.warmVoice(); } catch (e) { }
       toast('API key save ho gayi.');
     } else {
       toast('Key theek nahi lag rahi (bohat choti hai).');
@@ -2131,6 +2241,7 @@ function bindEvents() {
     $('#onboard').classList.add('hidden');
     try { Native.requestMicPermission(); } catch (e) { }
     updateConnState();
+    if (settings.handsFree) applyBackground(settings.alwaysOn !== false);
     if (!isKeySet()) {
       showKeySetup();
       return;
@@ -2182,8 +2293,11 @@ function init() {
     updateConnState();
     if (!isKeySet()) {
       showKeySetup();
-    } else if (settings.handsFree) {
-      try { Native.keepAwake(true); } catch (e) { }
+    } else {
+      // Always-on is the default: start the foreground service and the
+      // native listen loop as soon as the app is ready.
+      if (settings.handsFree) applyBackground(settings.alwaysOn !== false);
+      try { Native.warmVoice(); } catch (e) { }
     }
   }
 

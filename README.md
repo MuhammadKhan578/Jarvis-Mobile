@@ -8,7 +8,13 @@ APK with the Android SDK command-line tools.
 
 ## Features
 
+- **Always online (background)** — a foreground service keeps Jarvis listening
+  after you leave the app: say "Jarvis ..." from any app, even with the screen
+  off. A low-priority "Jarvis online" notification stays visible (Android
+  requires it). Turn it off in **Settings > Always online (background)**.
 - Tap the orb and speak in English or Roman Urdu (or type a command).
+- **Fast answers** — short recognition silence window, trimmed prompt/history,
+  and a pre-warmed neural-voice cache so common replies start instantly.
 - **PC-quality neural voice** (Gemini TTS, 24 kHz WAV). Long replies are split
   into sentences, synthesised in parallel and played in order, so the first
   words start in a couple of seconds. Falls back to the Android voice if the
@@ -84,7 +90,7 @@ powershell -ExecutionPolicy Bypass -File .\build_apk.ps1 `
   -Sdk "C:\Android\Sdk" -Jdk "C:\Program Files\Java\jdk-17"
 ```
 
-Output: `JarvisMobile.apk` in this folder. Version 1.3.0 (versionCode 4).
+Output: `JarvisMobile.apk` in this folder. Version 1.4.0 (versionCode 5).
 
 On the first build the script creates a local development keystore at
 `keystore/jarvis.keystore` with a random password saved in
@@ -116,6 +122,7 @@ The package name is `com.jarvis.mobile`.
 | `app/` | Android source (Java + HTML/CSS/JS HUD) |
 | `app/assets/www/` | The HUD: `index.html`, `app.js`, `style.css` |
 | `app/java/com/jarvis/mobile/` | Native bridge, speech, neural TTS, automation, intents |
+| `app/java/com/jarvis/mobile/JarvisService.java` | Foreground service for always-on background listening |
 | `app/res/xml/accessibility_service_config.xml` | Phone automation service config |
 | `build_apk.ps1` | Builds and signs the APK without Gradle |
 | `install_on_phone.ps1` | Installs the APK over USB |
@@ -142,6 +149,10 @@ The package name is `com.jarvis.mobile`.
   the real Open button.
 - **Mic does not start** — grant the microphone permission, and install the
   Google app / Speech Recognition & Synthesis.
+- **Background listening stops** — allow notifications for Jarvis, and turn off
+  battery optimisation for it (**Settings > Apps > Jarvis > Battery > Unrestricted**).
+  Do not swipe the app away from Recents; press Back instead, which keeps the
+  service running.
 - **Build cannot find SDK/JDK** — use the `-Sdk` and `-Jdk` arguments above.
 
 ## License

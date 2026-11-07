@@ -18,6 +18,7 @@ public class MainActivity extends Activity {
 
     public static final int REQ_MIC = 1001;
     public static final int REQ_CAMERA = 1002;
+    public static final int REQ_NOTIF = 1003;
 
     private WebView web;
     private JsBridge bridge;
@@ -103,6 +104,26 @@ public class MainActivity extends Activity {
         applyInsets(web);
         setContentView(web);
         web.loadUrl("file:///android_asset/www/index.html");
+
+        startBackgroundIfEnabled();
+        askNotificationPermission();
+    }
+
+    /** Keeps Jarvis listening after the user leaves the app. */
+    private void startBackgroundIfEnabled() {
+        try {
+            if (JarvisService.isEnabled(this)) JarvisService.start(this);
+        } catch (Exception ignored) { }
+    }
+
+    private void askNotificationPermission() {
+        try {
+            if (Build.VERSION.SDK_INT >= 33
+                    && checkSelfPermission("android.permission.POST_NOTIFICATIONS")
+                    != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, REQ_NOTIF);
+            }
+        } catch (Exception ignored) { }
     }
 
     private void applyInsets(View view) {
@@ -157,16 +178,16 @@ public class MainActivity extends Activity {
     @Override
     protected void onPause() {
         super.onPause();
-        try {
-            if (speech != null) speech.cancel();
-            if (bridge != null) bridge.stopSpeaking();
-        } catch (Exception ignored) { }
+        // Do NOT cancel the microphone or the voice here: the whole point of
+        // background mode is that Jarvis keeps listening and finishes talking
+        // while the user is in another app or the screen is off.
         if (web != null) web.evaluateJavascript("window.jarvisNative&&jarvisNative.onAppPause()", null);
     }
 
     @Override
     protected void onResume() {
         super.onResume();
+        startBackgroundIfEnabled();
         if (web != null) web.evaluateJavascript("window.jarvisNative&&jarvisNative.onAppResume()", null);
     }
 
