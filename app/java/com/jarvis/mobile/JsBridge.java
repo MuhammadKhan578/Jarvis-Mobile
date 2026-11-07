@@ -58,6 +58,8 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
     private String pendingRoman = "";
     private String pendingUrdu = "";
     private boolean neuralActive = false;
+    /** User pressed the in-app mic button to turn the microphone off. */
+    private volatile boolean micMuted = false;
 
     public JsBridge(Activity activity, WebView web, TtsEngine tts, SpeechEngine speech) {
         this.activity = activity;
@@ -123,7 +125,11 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
 
     /** The microphone stays off while Jarvis is thinking or talking. */
     private void releaseMic() {
-        try { if (speech != null) speech.setHeld(false); } catch (Exception ignored) { }
+        try {
+            if (speech == null) return;
+            if (micMuted) speech.setHeld(true);
+            else speech.setHeld(false);
+        } catch (Exception ignored) { }
     }
 
     /**
@@ -173,12 +179,12 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
     @JavascriptInterface
     public void setAlwaysOn(boolean on) {
         prefs.edit().putBoolean(JarvisService.KEY_ALWAYS_ON, on).apply();
-        if (on) {
+        if (on && !micMuted) {
             JarvisService.start(activity);
         } else {
             JarvisService.stop(activity);
         }
-        try { if (speech != null) speech.setAutoLoop(on); } catch (Exception ignored) { }
+        try { if (speech != null) speech.setAutoLoop(on && !micMuted); } catch (Exception ignored) { }
         if (!on) releaseMic();
     }
 
@@ -190,7 +196,37 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
     /** Native mic loop: JS timers are frozen in the background, this is not. */
     @JavascriptInterface
     public void setAutoListen(boolean on) {
-        try { if (speech != null) speech.setAutoLoop(on); } catch (Exception ignored) { }
+        try { if (speech != null) speech.setAutoLoop(on && !micMuted); } catch (Exception ignored) { }
+    }
+
+    /** User mute from the orb button. Nothing may re-arm the mic until false. */
+    @JavascriptInterface
+    public void setMicMuted(boolean muted) {
+        micMuted = muted;
+        if (muted) pendingListen = false;
+        try {
+            if (speech != null) {
+                if (muted) {
+                    speech.setAutoLoop(false);
+                    speech.setHeld(true);
+                    speech.cancel();
+                } else {
+                    speech.setHeld(false);
+                }
+            }
+            // While muted there is nothing to keep alive, so remove the
+            // misleading "Jarvis online" notification and its wake lock.
+            if (muted) {
+                JarvisService.stop(activity);
+            } else if (prefs.getBoolean(JarvisService.KEY_ALWAYS_ON, true)) {
+                JarvisService.start(activity);
+            }
+        } catch (Exception ignored) { }
+    }
+
+    @JavascriptInterface
+    public boolean isMicMuted() {
+        return micMuted;
     }
 
     @JavascriptInterface
@@ -483,6 +519,7 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
 
     @JavascriptInterface
     public String startListening() {
+        if (micMuted) return "muted";
         if (activity.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             pendingListen = true;
             main.post(() -> activity.requestPermissions(
@@ -563,7 +600,7 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
 
     public void onPermissionResult(String which, boolean granted) {
         callJs("window.jarvisNative&&jarvisNative.onPermission(" + q(which) + "," + granted + ")");
-        if ("mic".equals(which) && granted && pendingListen) {
+        if ("mic".equals(which) && granted && pendingListen && !micMuted) {
             pendingListen = false;
             speech.start();
         } else if ("mic".equals(which) && !granted) {
@@ -691,7 +728,7 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
 
     @JavascriptInterface
     public String version() {
-        return "1.4.0";
+        return "1.5.0";
     }
 
     @JavascriptInterface

@@ -90,7 +90,7 @@ powershell -ExecutionPolicy Bypass -File .\build_apk.ps1 `
   -Sdk "C:\Android\Sdk" -Jdk "C:\Program Files\Java\jdk-17"
 ```
 
-Output: `JarvisMobile.apk` in this folder. Version 1.4.0 (versionCode 5).
+Output: `JarvisMobile.apk` in this folder. Version 1.5.0 (versionCode 6).
 
 On the first build the script creates a local development keystore at
 `keystore/jarvis.keystore` with a random password saved in

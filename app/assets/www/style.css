@@ -260,6 +260,29 @@ button { cursor: pointer; }
 }
 .orb:active .orb-core { transform: scale(.94); }
 
+/* User muted the microphone: dim the orb and draw a slash over the glyph. */
+body.mic-muted .orb-core {
+  position: relative;
+  color: #ffb3b3;
+  border-color: rgba(255, 107, 107, 0.6);
+  background:
+    radial-gradient(circle at 38% 32%, rgba(255, 179, 179, 0.4), rgba(255, 107, 107, 0.12) 42%, rgba(5, 12, 19, 0.9) 72%);
+  box-shadow: 0 0 18px rgba(255, 107, 107, 0.25), inset 0 0 18px rgba(255, 107, 107, 0.18);
+  animation: none;
+}
+body.mic-muted .orb-core::after {
+  content: '';
+  position: absolute;
+  left: 50%; top: 50%;
+  width: 44px; height: 2px;
+  border-radius: 2px;
+  background: #ff6b6b;
+  box-shadow: 0 0 8px rgba(255, 107, 107, 0.9);
+  transform: translate(-50%, -50%) rotate(-45deg);
+}
+body.mic-muted .ring { opacity: .35; animation-play-state: paused; }
+body.mic-muted .state-label { color: #ff9a9a; }
+
 body[data-state="listening"] .orb-core {
   color: #fff;
   box-shadow: 0 0 26px rgba(56, 240, 255, 0.7), 0 0 70px rgba(56, 240, 255, 0.3), inset 0 0 22px rgba(56, 240, 255, 0.5);

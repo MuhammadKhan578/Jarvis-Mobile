@@ -140,14 +140,18 @@ public class JarvisService extends Service {
             return START_NOT_STICKY;
         }
         goForeground();
-        return START_STICKY;
+        // Do not let Android resurrect a service whose activity (and therefore
+        // SpeechEngine) no longer exists — that left a zombie notification.
+        return START_NOT_STICKY;
     }
 
     @Override
     public void onTaskRemoved(Intent rootIntent) {
-        // Swiping the app away must not kill the assistant: the notification
-        // stays and "Hey Jarvis" keeps working until the user stops it.
+        // The activity owns the microphone engine. Once the user swipes the app
+        // away there is no recognizer left, so stop the service instead of
+        // keeping a dead "Jarvis online" notification behind.
         super.onTaskRemoved(rootIntent);
+        stopSelf();
     }
 
     @Override

@@ -2,6 +2,7 @@ package com.jarvis.mobile;
 
 import android.content.Context;
 import android.content.Intent;
+import android.media.AudioManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -87,12 +88,34 @@ public class SpeechEngine {
     private volatile boolean blockedByPermission = false;
     private Runnable restartRunnable;
 
+    /**
+     * Restart backoff: grows while the mic hears nothing, resets on speech.
+     * Prevents the "beep every second" loop when nobody is talking.
+     */
+    private int emptyStreak = 0;
+
+    /** Google's recognizer beep is played on the media/notification streams. */
+    private final AudioManager audio;
+    private final int[] beepStreams = {
+            AudioManager.STREAM_MUSIC,
+            AudioManager.STREAM_NOTIFICATION,
+            AudioManager.STREAM_SYSTEM,
+            AudioManager.STREAM_ACCESSIBILITY
+    };
+    private final boolean[] beepWasMuted = new boolean[beepStreams.length];
+    private boolean beepMuted = false;
+    private Runnable beepTimer;
+
+    /** Recovery watchdog for a recognizer session that never calls back. */
+    private Runnable watchdog;
+
     /** Every distinct transcript heard during the current utterance. */
     private final LinkedHashSet<String> heard = new LinkedHashSet<>();
     private String lastPartial = "";
 
     public SpeechEngine(Context context) {
         this.context = context.getApplicationContext();
+        this.audio = (AudioManager) this.context.getSystemService(Context.AUDIO_SERVICE);
         main.post(this::createRecognizer);
     }
 
@@ -112,19 +135,26 @@ public class SpeechEngine {
             recognizer.setRecognitionListener(new RecognitionListener() {
                 @Override public void onReadyForSpeech(Bundle params) {
                     listening = true;
+                    scheduleBeepRestore(350);
                     android.util.Log.d("JarvisMobile", "STT ready");
                     if (listener != null) listener.onSpeechReady();
                 }
-                @Override public void onBeginningOfSpeech() { }
+                @Override public void onBeginningOfSpeech() {
+                    armWatchdog(25000);
+                    restoreBeepStreams();
+                }
                 @Override public void onRmsChanged(float rmsdB) {
                     if (listener != null) listener.onSpeechRms(rmsdB);
                 }
                 @Override public void onBufferReceived(byte[] buffer) { }
                 @Override public void onEndOfSpeech() {
+                    restoreBeepStreams();
                     if (listener != null) listener.onSpeechEnd();
                 }
                 @Override public void onError(int error) {
                     listening = false;
+                    cancelWatchdog();
+                    restoreBeepStreams();
                     if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
                         blockedByPermission = true;
                     }
@@ -136,15 +166,24 @@ public class SpeechEngine {
                         if (!all.contains(lastPartial)) all.add(0, lastPartial);
                         android.util.Log.d("JarvisMobile", "STT recover partial: " + lastPartial);
                         if (listener != null) listener.onSpeechFinal(lastPartial, all);
-                        scheduleRestart(350);
+                        emptyStreak = 0;
+                        scheduleRestart(400);
                         return;
                     }
                     android.util.Log.w("JarvisMobile", "STT error " + error + " " + errorText(error));
                     if (listener != null) listener.onSpeechError(error, errorText(error));
-                    scheduleRestart(error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY ? 900 : 450);
+                    if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
+                        // Do not spin: wait for the user to grant the permission.
+                        return;
+                    }
+                    scheduleRestart(error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY
+                            ? 1000
+                            : nextRestartDelay(false));
                 }
                 @Override public void onResults(Bundle results) {
                     listening = false;
+                    cancelWatchdog();
+                    restoreBeepStreams();
                     ArrayList<String> all = collect(results);
                     if (all.isEmpty() && !lastPartial.isEmpty()) all.add(0, lastPartial);
                     String text = all.isEmpty() ? "" : all.get(0);
@@ -154,13 +193,15 @@ public class SpeechEngine {
                                 "Awaaz mili lekin alfaz samajh nahi aaye.");
                         else listener.onSpeechFinal(text, all);
                     }
-                    scheduleRestart(350);
+                    scheduleRestart(nextRestartDelay(!text.isEmpty()));
                 }
                 @Override public void onPartialResults(Bundle partialResults) {
                     String text = firstResult(partialResults);
                     if (text.isEmpty()) return;
+                    emptyStreak = 0;
                     lastPartial = text;
                     heard.add(text);
+                    armWatchdog(25000);
                     if (listener != null) listener.onSpeechPartial(text);
                 }
                 @Override public void onEvent(int eventType, Bundle params) { }
@@ -203,6 +244,87 @@ public class SpeechEngine {
         return new ArrayList<>(heard);
     }
 
+    // --------------------------------------------------- beep + session guard
+
+    /**
+     * Google's speech service plays a short chime on every recognizer start.
+     * There is no public API to disable it, so the standard workaround is to
+     * briefly mute the streams it uses and restore them right after the
+     * session becomes ready. Only used for the native background loop.
+     */
+    private void muteBeepStreams() {
+        if (audio == null || beepMuted) return;
+        beepMuted = true;
+        for (int i = 0; i < beepStreams.length; i++) {
+            try {
+                beepWasMuted[i] = audio.isStreamMute(beepStreams[i]);
+                if (!beepWasMuted[i]) audio.setStreamMute(beepStreams[i], true);
+            } catch (Exception ignored) {
+                beepWasMuted[i] = false;
+            }
+        }
+    }
+
+    private void restoreBeepStreams() {
+        if (!beepMuted) return;
+        beepMuted = false;
+        if (beepTimer != null) {
+            main.removeCallbacks(beepTimer);
+            beepTimer = null;
+        }
+        if (audio == null) return;
+        for (int i = 0; i < beepStreams.length; i++) {
+            try {
+                if (!beepWasMuted[i]) audio.setStreamMute(beepStreams[i], false);
+            } catch (Exception ignored) { }
+        }
+    }
+
+    private void scheduleBeepRestore(long delayMs) {
+        if (!beepMuted) return;
+        if (beepTimer != null) main.removeCallbacks(beepTimer);
+        beepTimer = this::restoreBeepStreams;
+        main.postDelayed(beepTimer, Math.max(120, delayMs));
+    }
+
+    private void armWatchdog(long timeoutMs) {
+        cancelWatchdog();
+        if (!autoLoop) return;
+        watchdog = () -> {
+            watchdog = null;
+            if (!autoLoop || held || destroyed || !listening) return;
+            android.util.Log.w("JarvisMobile", "STT watchdog: hung session, restarting");
+            restoreBeepStreams();
+            try { if (recognizer != null) recognizer.cancel(); } catch (Exception ignored) { }
+            listening = false;
+            heard.clear();
+            lastPartial = "";
+            if (listener != null) {
+                listener.onSpeechError(SpeechRecognizer.ERROR_SPEECH_TIMEOUT, "Speech timeout.");
+            }
+            scheduleRestart(nextRestartDelay(false));
+        };
+        main.postDelayed(watchdog, timeoutMs);
+    }
+
+    private void cancelWatchdog() {
+        if (watchdog != null) {
+            main.removeCallbacks(watchdog);
+            watchdog = null;
+        }
+    }
+
+    private long nextRestartDelay(boolean heardSomething) {
+        if (heardSomething) {
+            emptyStreak = 0;
+            return 400;
+        }
+        emptyStreak = Math.min(emptyStreak + 1, 6);
+        // Keep the idle gap short: the chime is muted, and the user should not
+        // have to wait long before "Hey Jarvis" is heard again.
+        return Math.min(2000L, 700L + emptyStreak * 400L);
+    }
+
     public boolean isRecognitionAvailable() {
         return SpeechRecognizer.isRecognitionAvailable(context);
     }
@@ -214,6 +336,7 @@ public class SpeechEngine {
     public void start() {
         main.post(() -> {
             if (destroyed) return;
+            if (held) return;
             if (recognizer == null) createRecognizer();
             if (recognizer == null) {
                 if (listener != null) listener.onSpeechError(-1,
@@ -228,6 +351,10 @@ public class SpeechEngine {
             }
             heard.clear();
             lastPartial = "";
+            if (autoLoop) {
+                // Native restarts produce a chime on every loop; silence it.
+                muteBeepStreams();
+            }
             try {
                 Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
                 intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
@@ -248,8 +375,14 @@ public class SpeechEngine {
                 }
                 listening = true;
                 recognizer.startListening(intent);
+                if (autoLoop) {
+                    scheduleBeepRestore(2500);
+                    armWatchdog(25000);
+                }
             } catch (Exception e) {
                 listening = false;
+                restoreBeepStreams();
+                cancelWatchdog();
                 if (listener != null) listener.onSpeechError(-1,
                         "Microphone start nahi ho saka: " + e.getMessage());
             }
@@ -260,9 +393,15 @@ public class SpeechEngine {
 
     /** Native auto-restart of the microphone (used while the app is in background). */
     public void setAutoLoop(boolean on) {
+        boolean was = autoLoop;
         autoLoop = on;
-        if (on) scheduleRestart(200);
-        else cancelRestart();
+        if (on) {
+            if (!was) scheduleRestart(200);
+        } else {
+            cancelRestart();
+            cancelWatchdog();
+            restoreBeepStreams();
+        }
     }
 
     public boolean isAutoLoop() {
@@ -271,10 +410,12 @@ public class SpeechEngine {
 
     /** Pause the loop while Jarvis is thinking or speaking, then resume. */
     public void setHeld(boolean value) {
+        boolean changed = held != value;
         held = value;
         if (value) {
             cancelRestart();
-        } else if (autoLoop) {
+            cancelWatchdog();
+        } else if (autoLoop && changed) {
             scheduleRestart(250);
         }
     }
@@ -307,6 +448,7 @@ public class SpeechEngine {
     /** Stops but still delivers the final result. */
     public void stop() {
         main.post(() -> {
+            restoreBeepStreams();
             try { if (recognizer != null && listening) recognizer.stopListening(); } catch (Exception ignored) { }
         });
     }
@@ -315,6 +457,8 @@ public class SpeechEngine {
     public void cancel() {
         main.post(() -> {
             cancelRestart();
+            cancelWatchdog();
+            restoreBeepStreams();
             try { if (recognizer != null) recognizer.cancel(); } catch (Exception ignored) { }
             listening = false;
             heard.clear();
@@ -327,6 +471,8 @@ public class SpeechEngine {
         autoLoop = false;
         main.post(() -> {
             cancelRestart();
+            cancelWatchdog();
+            restoreBeepStreams();
             try { if (recognizer != null) { recognizer.cancel(); recognizer.destroy(); } } catch (Exception ignored) { }
             recognizer = null;
             listening = false;

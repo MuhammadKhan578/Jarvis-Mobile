@@ -115,6 +115,11 @@ public class MainActivity extends Activity {
     /** Keeps Jarvis listening after the user leaves the app. */
     private void startBackgroundIfEnabled() {
         try {
+            // A user mute must survive resume: do not re-arm the service.
+            if (bridge != null && bridge.isMicMuted()) {
+                JarvisService.stop(this);
+                return;
+            }
             if (JarvisService.isEnabled(this)) JarvisService.start(this);
         } catch (Exception ignored) { }
     }
@@ -212,6 +217,12 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        // The SpeechEngine belongs to this activity, so a foreground service
+        // that outlived it would show a "Jarvis online" notification with a
+        // dead microphone. Stop it whenever the activity is really going away.
+        if (!isChangingConfigurations()) {
+            try { JarvisService.stop(this); } catch (Exception ignored) { }
+        }
         try { if (speech != null) speech.destroy(); } catch (Exception ignored) { }
         try { if (tts != null) tts.shutdown(); } catch (Exception ignored) { }
         try { if (web != null) { web.removeJavascriptInterface("Android"); web.destroy(); } } catch (Exception ignored) { }

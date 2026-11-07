@@ -118,7 +118,7 @@ const Native = window.Android || {
   },
   executeTool: () => JSON.stringify({ ok: false, message: 'Native tools available nahi hain.' }),
   getStatus: () => JSON.stringify({ ok: true, data: { online: navigator.onLine, battery: -1, network: 'unknown' } }),
-  version: () => '1.4.0-web',
+  version: () => '1.5.0-web',
   deviceSummary: () => 'Browser',
   toast: (m) => window.jarvisToast && window.jarvisToast(m),
   vibrate: () => { },
@@ -132,6 +132,7 @@ const Native = window.Android || {
   setAlwaysOn: () => { },
   isAlwaysOn: () => false,
   setAutoListen: () => { },
+  setMicMuted: () => { },
   holdListening: () => { },
   isHoldingMic: () => false,
   openServiceSettings: () => { },
@@ -269,13 +270,68 @@ function bgMode() {
   return settings.alwaysOn !== false && settings.handsFree !== false;
 }
 
+/* Explicit microphone mute. While true nothing may start the recognizer until
+   the user taps the orb again. It applies to both JS and the native loop. */
+let micMuted = false;
+
+function updateMicUI() {
+  try {
+    document.body.classList.toggle('mic-muted', !!micMuted);
+    if (orbEl) {
+      orbEl.setAttribute('aria-pressed', state === 'listening' && !micMuted ? 'true' : 'false');
+      orbEl.setAttribute('aria-label', micMuted ? 'Turn microphone on' : 'Talk to Jarvis');
+      orbEl.setAttribute('title', micMuted ? 'Mic off — tap to turn on' : 'Talk to Jarvis');
+    }
+  } catch (e) { }
+}
+
+function setMicMuted(muted, quiet) {
+  micMuted = !!muted;
+  clearTimeout(listenTimer);
+  clearListenSafety();
+  micStartPending = false;
+  try {
+    Native.setMicMuted(micMuted);
+    if (micMuted) {
+      Native.setAutoListen(false);
+      Native.holdListening(true);
+      Native.cancelListening();
+      Native.stopSpeaking();
+    } else {
+      Native.holdListening(false);
+      Native.setAutoListen(bgMode());
+    }
+  } catch (e) { }
+  if (micMuted) {
+    transcript('');
+    setState('idle');
+    if (!quiet) toast('Mic band. Dubara tap karne par on ho jayega.');
+  }
+  updateMicUI();
+  updateConnState();
+}
+
+/* Orb tap: mute when the mic is (or would be) live, otherwise listen. */
+function toggleMic() {
+  if (micMuted) {
+    setMicMuted(false);
+    startListening(true);
+    return;
+  }
+  if (state === 'listening' || settings.handsFree) {
+    setMicMuted(true);
+    return;
+  }
+  startListening(true);
+}
+
 function applyBackground(on) {
   settings.alwaysOn = !!on;
   saveSettings();
   try {
     Native.setAlwaysOn(!!on);
-    Native.setAutoListen(bgMode());
-    Native.holdListening(false);
+    Native.setAutoListen(bgMode() && !micMuted);
+    Native.holdListening(!!micMuted);
   } catch (e) { }
   // The service holds the CPU awake; the screen itself may sleep.
   try { Native.keepAwake(false); } catch (e) { }
@@ -283,7 +339,7 @@ function applyBackground(on) {
     try { Native.cancelListening(); } catch (e) { }
     clearTimeout(listenTimer);
     if (state === 'listening') setState('idle');
-  } else if (settings.handsFree && state === 'idle' && !busy) {
+  } else if (settings.handsFree && state === 'idle' && !busy && !micMuted) {
     startListening(false);
   }
 }
@@ -297,14 +353,15 @@ function setState(next, label) {
   document.body.dataset.state = next;
   if (stateLabelEl) {
     const labels = {
-      idle: 'TAP TO SPEAK',
+      idle: micMuted ? 'MIC OFF · TAP TO ON' : 'TAP TO SPEAK',
       listening: 'SUN RAHA HOON...',
       thinking: 'SOCH RAHA HOON...',
       speaking: 'BOL RAHA HOON...'
     };
     stateLabelEl.textContent = label || labels[next] || '';
   }
-  if (orbEl) orbEl.setAttribute('aria-pressed', next === 'listening' ? 'true' : 'false');
+  if (orbEl) orbEl.setAttribute('aria-pressed', next === 'listening' && !micMuted ? 'true' : 'false');
+  updateMicUI();
 }
 
 function transcript(text) {
@@ -333,6 +390,11 @@ function finishSpeaking() {
   clearTimeout(speakSafety);
   if (state !== 'speaking') return;
   setState('idle');
+  // Muted by the user: never let TTS completion re-open the microphone.
+  if (micMuted) {
+    try { Native.setAutoListen(false); Native.holdListening(true); } catch (e) { }
+    return;
+  }
   // Native speech engine released the mic on TTS completion; in background
   // mode it restarts the recognizer by itself, so no JS timer is needed.
   try { Native.holdListening(false); } catch (e) { }
@@ -349,7 +411,9 @@ function stopEverything() {
   micStartPending = false;
   try { Native.stopSpeaking(); } catch (e) { }
   try { Native.cancelListening(); } catch (e) { }
-  try { Native.holdListening(false); } catch (e) { }
+  // Keep the native loop paused until the reply has finished speaking, so it
+  // cannot restart the mic in the middle of the "stopped" confirmation.
+  try { Native.setAutoListen(false); Native.holdListening(true); } catch (e) { }
   setState('idle');
   transcript('');
 }
@@ -362,9 +426,13 @@ function clearListenSafety() {
 /** If the recognizer goes quiet forever, recover instead of hanging on "SUN RAHA HOON". */
 function armListenSafety(ms) {
   clearListenSafety();
+  // In background mode the native loop and its watchdog own the microphone.
+  // Throttled WebView timers used to fire late and kill healthy sessions,
+  // which caused the endless mic on/off cycling and repeat beeps.
+  if (bgMode() || micMuted) return;
   listenSafety = setTimeout(() => {
     listenSafety = null;
-    if (state !== 'listening') return;
+    if (state !== 'listening' || micMuted) return;
     try { Native.cancelListening(); } catch (e) { }
     setState('idle');
     transcript('');
@@ -374,7 +442,7 @@ function armListenSafety(ms) {
 
 function scheduleListen(delay) {
   clearTimeout(listenTimer);
-  if (!settings.handsFree || !appActive) return;
+  if (micMuted || !settings.handsFree || !appActive) return;
   // In background mode the native loop owns the microphone. JS timers are
   // frozen while the app is hidden, so trusting them here would stop listening.
   if (bgMode()) {
@@ -382,12 +450,13 @@ function scheduleListen(delay) {
     return;
   }
   listenTimer = setTimeout(() => {
-    if (!appActive || !settings.handsFree || state !== 'idle' || busy) return;
+    if (!appActive || !settings.handsFree || micMuted || state !== 'idle' || busy) return;
     startListening(false);
   }, delay == null ? 700 : delay);
 }
 
 function startListening(fromUser) {
+  if (micMuted) { updateMicUI(); return; }
   if (busy || state === 'thinking') {
     toast('Ek second sir, jawab aa raha hai.');
     return;
@@ -493,7 +562,7 @@ function respond(roman, urdu, opts) {
   try { Native.log('REPLY ' + roman); } catch (e) { }
   if (o.silent !== true) speak(roman, urdu);
   else {
-    try { Native.holdListening(false); } catch (e) { }
+    try { Native.holdListening(!!micMuted); } catch (e) { }
     if (settings.handsFree) scheduleListen(700);
   }
 }
@@ -522,6 +591,11 @@ function updateConnState() {
   } catch (e) { }
   if (!Native.hasApiKey()) {
     el.textContent = 'KEY MISSING';
+    el.classList.add('offline');
+    return;
+  }
+  if (micMuted) {
+    el.textContent = 'MIC OFF';
     el.classList.add('offline');
     return;
   }
@@ -805,6 +879,7 @@ async function localCommand(text) {
   if (/^(stop|ruk jao|ruk|chup raho|chup|band karo voice)$/.test(low) ||
       /^(stop|ruk|chup)/.test(low) && text.length < 24) {
     stopEverything();
+    setMicMuted(true, true);
     const l = replyFor(lang, 'Stopped, sir.', LINES.stopped.roman, LINES.stopped.urdu);
     respond(l.roman, l.urdu);
     return true;
@@ -1497,7 +1572,7 @@ async function handleCommand(raw) {
     errorReply(e);
   } finally {
     busy = false;
-    if (state !== 'speaking') {
+    if (state !== 'speaking' && !micMuted) {
       try { Native.holdListening(false); } catch (e) { }
     }
   }
@@ -1906,6 +1981,8 @@ window.jarvisNative = {
   onSpeechReady() {
     // A background restart of the recognizer happens inside native code, so
     // the UI has to follow it here; otherwise the transcript is thrown away.
+    // Ignore stale callbacks that arrive while muted or while TTS is running.
+    if (micMuted || state === 'thinking' || state === 'speaking') return;
     if (state !== 'listening') {
       setState('listening');
       transcript('');
@@ -1914,12 +1991,19 @@ window.jarvisNative = {
     armListenSafety(15000);
   },
   onSpeechPartial(text) {
-    if (state === 'listening') transcript(text);
+    if (!micMuted && state === 'listening') transcript(text);
   },
   onSpeechFinal(text, alternativesJson) {
+    if (micMuted) {
+      try { Native.cancelListening(); } catch (e) { }
+      return;
+    }
     if (state !== 'listening') return;
     clearListenSafety();
     micStartPending = false;
+    // Stop any native restart that was already queued before we decide
+    // whether this utterance was a command.
+    try { Native.holdListening(true); } catch (e) { }
     let alts = [];
     try { alts = JSON.parse(alternativesJson || '[]'); } catch (e) { alts = []; }
     if (!Array.isArray(alts)) alts = [];
@@ -1956,10 +2040,10 @@ window.jarvisNative = {
     if (bgMode()) pushToTalk = false;
   },
   onSpeechEnd() {
-    if (state === 'listening') stateLabelEl.textContent = 'PROCESSING...';
+    if (!micMuted && state === 'listening') stateLabelEl.textContent = 'PROCESSING...';
   },
   onSpeechError(code, message) {
-    if (state !== 'listening') return;
+    if (micMuted || state !== 'listening') return;
     clearListenSafety();
     micStartPending = false;
     if (code === 7 || code === 6) {
@@ -1978,9 +2062,11 @@ window.jarvisNative = {
     }
     if (code === 2 || code === 3) {
       toast('Speech service ko internet nahi mil raha.');
+      if (settings.handsFree && appActive) scheduleListen(2500);
       return;
     }
     toast(message || 'Speech error.');
+    if (settings.handsFree && appActive) scheduleListen(1500);
   },
   onSpeechRms(rms) {
     if (state === 'listening' && orbEl) {
@@ -1996,12 +2082,20 @@ window.jarvisNative = {
         toast('Mic permission ke baghair voice command nahi chalegi.');
         if (state === 'listening') setState('idle');
       } else {
+        if (micMuted) {
+          micStartPending = false;
+          try { Native.setAutoListen(false); Native.holdListening(true); } catch (e) { }
+          return;
+        }
         if (micStartPending) {
           // The native side starts the recognizer right after this callback;
           // keep the UI in listening state so the first command is not lost.
           micStartPending = false;
           setState('listening');
           armListenSafety(15000);
+        } else if (settings.handsFree && appActive && state === 'idle' && !busy) {
+          // Permission was granted after a "code 9" error: resume the mic.
+          scheduleListen(300);
         }
         toast('Mic ready.');
       }
@@ -2014,6 +2108,16 @@ window.jarvisNative = {
     return false;
   },
   onAppPause() {
+    // A user mute always wins over background mode: never re-arm the mic.
+    if (micMuted) {
+      appActive = true;
+      pushToTalk = false;
+      try {
+        Native.setAutoListen(false);
+        Native.holdListening(true);
+      } catch (e) { }
+      return;
+    }
     // Background mode: keep listening and keep talking. Only a real "always
     // online OFF" setting stops the assistant when the app leaves the screen.
     if (bgMode()) {
@@ -2035,6 +2139,16 @@ window.jarvisNative = {
     appActive = true;
     updateConnState();
     renderSettings();
+    updateMicUI();
+    if (micMuted) {
+      try {
+        Native.setMicMuted(true);
+        Native.setAutoListen(false);
+        Native.holdListening(true);
+      } catch (e) { }
+      if (state !== 'idle') setState('idle');
+      return;
+    }
     if (bgMode()) {
       try {
         Native.setAlwaysOn(true);
@@ -2053,7 +2167,7 @@ window.jarvisNative = {
 
 /* ================================================================== EVENTS */
 function bindEvents() {
-  $('#orb').addEventListener('click', () => startListening(true));
+  $('#orb').addEventListener('click', toggleMic);
   $('#orb').addEventListener('contextmenu', e => e.preventDefault());
 
   $('#btnSend').addEventListener('click', sendTyped);
@@ -2152,8 +2266,10 @@ function bindEvents() {
     } catch (err) { }
     if (settings.handsFree) {
       toast('Hands-free ON. “Hey Jarvis” bolein.');
-      try { Native.holdListening(false); } catch (err) { }
-      if (state === 'idle') startListening(false);
+      if (!micMuted) {
+        try { Native.holdListening(false); } catch (err) { }
+        if (state === 'idle') startListening(false);
+      }
     } else {
       clearTimeout(listenTimer);
       try { Native.setAutoListen(false); Native.cancelListening(); } catch (err) { }
