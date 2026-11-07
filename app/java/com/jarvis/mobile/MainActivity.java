@@ -20,6 +20,9 @@ public class MainActivity extends Activity {
     public static final int REQ_CAMERA = 1002;
     public static final int REQ_NOTIF = 1003;
 
+    /** True while the activity is on screen. Used to allow background app launches. */
+    public static volatile boolean visible = false;
+
     private WebView web;
     private JsBridge bridge;
     private TtsEngine tts;
@@ -178,6 +181,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onPause() {
         super.onPause();
+        visible = false;
         // Do NOT cancel the microphone or the voice here: the whole point of
         // background mode is that Jarvis keeps listening and finishes talking
         // while the user is in another app or the screen is off.
@@ -187,6 +191,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        visible = true;
         startBackgroundIfEnabled();
         if (web != null) web.evaluateJavascript("window.jarvisNative&&jarvisNative.onAppResume()", null);
     }

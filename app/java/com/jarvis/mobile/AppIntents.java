@@ -133,11 +133,12 @@ public final class AppIntents {
 
     private static boolean launchPackage(Context c, String pkg) {
         if (pkg == null || pkg.isEmpty()) return false;
+        if (!launchAllowed(c)) return false;
         try {
             Intent i = c.getPackageManager().getLaunchIntentForPackage(pkg);
             if (i == null) return false;
             i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            c.startActivity(i);
+            launchContext(c).startActivity(i);
             return true;
         } catch (Exception e) {
             return false;
@@ -145,15 +146,42 @@ public final class AppIntents {
     }
 
     private static boolean start(Context c, Intent intent) {
+        if (!launchAllowed(c)) return false;
         try {
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            c.startActivity(intent);
+            launchContext(c).startActivity(intent);
             return true;
         } catch (ActivityNotFoundException e) {
             android.util.Log.w("JarvisMobile", "start: no activity for " + intent + " :: " + e);
             return false;
         } catch (Exception e) {
             android.util.Log.w("JarvisMobile", "start: failed for " + intent + " :: " + e);
+            return false;
+        }
+    }
+
+    /**
+     * Android 10+ blocks activity starts from a background app. A bound
+     * accessibility service is one of the documented exemptions, so when
+     * Phone automation is on we launch through it; otherwise we use the normal
+     * context (works while the app is on screen).
+     */
+    private static Context launchContext(Context c) {
+        try {
+            JarvisAccessibilityService svc = JarvisAccessibilityService.instance();
+            if (svc != null) return svc;
+        } catch (Exception ignored) { }
+        return c;
+    }
+
+    /** Background activity starts are blocked unless the app is visible or has automation on. */
+    private static boolean launchAllowed(Context c) {
+        try {
+            if (MainActivity.visible) return true;
+        } catch (Exception ignored) { }
+        try {
+            return JarvisAccessibilityService.instance() != null;
+        } catch (Exception e) {
             return false;
         }
     }
@@ -198,6 +226,10 @@ public final class AppIntents {
             return res(true, appLabel(c, byLabel) + " khol diya.", false, null);
         }
         if ("gmail".equals(pkg)) return openGmail(c);
+        if (!launchAllowed(c)) {
+            return res(false, "Background se app kholne ke liye Settings > Phone automation on karein.",
+                    true, null);
+        }
         return res(false, "Phone par '" + rawName + "' app nahi mili.", false, null);
     }
 
