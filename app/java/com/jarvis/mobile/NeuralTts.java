@@ -62,7 +62,7 @@ public class NeuralTts {
     };
 
     private static final int MAX_CACHE_FILES = 80;
-    private static final int IO_TIMEOUT_MS = 25000;
+    private static final int IO_TIMEOUT_MS = 15000;
 
     private final Context context;
     private final Handler main = new Handler(Looper.getMainLooper());
