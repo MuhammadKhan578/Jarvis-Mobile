@@ -62,7 +62,24 @@ public class NeuralTts {
     };
 
     private static final int MAX_CACHE_FILES = 80;
-    private static final int IO_TIMEOUT_MS = 15000;
+    private static final int IO_TIMEOUT_MS = 9000;
+    private static final int CONNECT_TIMEOUT_MS = 6000;
+    /** Remembers the model that worked, so the next reply skips dead models. */
+    private static volatile String goodModel = "";
+
+    private List<String> modelOrder() {
+        List<String> order = new ArrayList<>();
+        String good = goodModel;
+        if (good != null && !good.isEmpty()) {
+            for (String m : MODELS) {
+                if (m.equals(good)) { order.add(m); break; }
+            }
+        }
+        for (String m : MODELS) {
+            if (!order.contains(m)) order.add(m);
+        }
+        return order;
+    }
 
     private final Context context;
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -190,13 +207,18 @@ public class NeuralTts {
                     File cached = new File(ttsDir(), sha1(v + "|" + text) + ".wav");
                     if (cached.exists() && cached.length() > 1000) return;
                     byte[] audio = null;
-                    for (String model : MODELS) {
+                    String usedModel = "";
+                    for (String model : modelOrder()) {
                         try {
                             audio = requestAudio(model, text, v, k);
-                            if (audio != null && audio.length > 1000) break;
+                            if (audio != null && audio.length > 1000) {
+                                usedModel = model;
+                                break;
+                            }
                         } catch (Exception ignored) { }
                     }
                     if (audio == null || audio.length <= 1000) return;
+                    if (!usedModel.isEmpty()) goodModel = usedModel;
                     store(v, text, audio);
                 } catch (Exception ignored) { }
             });
@@ -231,17 +253,21 @@ public class NeuralTts {
             }
             byte[] audio = null;
             Exception last = null;
+            String usedModel = "";
             final String useVoice;
             final String useKey;
             synchronized (lock) {
                 useVoice = voice;
                 useKey = apiKey;
             }
-            for (String model : MODELS) {
+            for (String model : modelOrder()) {
                 if (!isCurrent(gen)) return;
                 try {
                     audio = requestAudio(model, text, useVoice, useKey);
-                    if (audio != null && audio.length > 1000) break;
+                    if (audio != null && audio.length > 1000) {
+                        usedModel = model;
+                        break;
+                    }
                 } catch (Exception e) {
                     last = e;
                     Log.w(TAG, "TTS " + model + " failed: " + e);
@@ -251,6 +277,7 @@ public class NeuralTts {
                 fail(gen, last == null ? "Neural voice ne audio nahi diya." : last.getMessage());
                 return;
             }
+            if (!usedModel.isEmpty()) goodModel = usedModel;
             store(useVoice, text, audio);
             onFileReady(gen, index, new File(ttsDir(), sha1(useVoice + "|" + text) + ".wav"));
         } catch (Exception e) {
@@ -274,12 +301,13 @@ public class NeuralTts {
                 .put("generationConfig", generationConfig);
 
         HttpURLConnection conn = null;
+        boolean reusable = false;
         try {
             URL url = new URL("https://generativelanguage.googleapis.com/v1beta/models/"
                     + model + ":generateContent");
             conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("POST");
-            conn.setConnectTimeout(10000);
+            conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
             conn.setReadTimeout(IO_TIMEOUT_MS);
             conn.setDoOutput(true);
             conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
@@ -292,6 +320,7 @@ public class NeuralTts {
             int code = conn.getResponseCode();
             InputStream stream = code >= 400 ? conn.getErrorStream() : conn.getInputStream();
             String raw = readAll(stream);
+            reusable = stream != null;
             if (code < 200 || code >= 300) {
                 throw new Exception("TTS HTTP " + code + ": " + trim(raw));
             }
@@ -338,7 +367,7 @@ public class NeuralTts {
             }
             return wrapWav(bytes, rate, channels);
         } finally {
-            if (conn != null) conn.disconnect();
+            if (conn != null && !reusable) conn.disconnect();
         }
     }
 

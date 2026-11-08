@@ -54,10 +54,13 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
     private final SpeechEngine speech;
     private final SharedPreferences prefs;
     private final Handler main = new Handler(Looper.getMainLooper());
+    private static final long NEURAL_START_TIMEOUT_MS = 4500;
     private boolean pendingListen = false;
     private String pendingRoman = "";
     private String pendingUrdu = "";
-    private boolean neuralActive = false;
+    private volatile boolean neuralActive = false;
+    /** Invalidates old TTS watchdogs when a new reply starts. */
+    private volatile int speechSeq = 0;
     /** User pressed the in-app mic button to turn the microphone off. */
     private volatile boolean micMuted = false;
 
@@ -91,12 +94,15 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
 
     @Override
     public void onTtsDone() {
+        speechSeq++;
+        neuralActive = false;
         releaseMic();
         callJs("window.jarvisNative&&jarvisNative.onTtsDone()");
     }
 
     @Override
     public void onTtsError(String message) {
+        speechSeq++;
         neuralActive = false;
         releaseMic();
         callJs("window.jarvisNative&&jarvisNative.onTtsError(" + q(message) + ")");
@@ -104,6 +110,7 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
 
     @Override
     public void onNeuralDone() {
+        speechSeq++;
         neuralActive = false;
         releaseMic();
         callJs("window.jarvisNative&&jarvisNative.onTtsDone()");
@@ -113,6 +120,7 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
     public void onNeuralError(String message) {
         // Already played a sentence? Then a fallback would repeat it. Just end.
         boolean played = neural.hasPlayedAny();
+        speechSeq++;
         neuralActive = false;
         if (played) {
             releaseMic();
@@ -141,6 +149,7 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
     public void speak(String roman, String urdu) {
         pendingRoman = roman == null ? "" : roman.trim();
         pendingUrdu = urdu == null ? "" : urdu.trim();
+        final int seq = ++speechSeq;
         try { if (speech != null) speech.setHeld(true); } catch (Exception ignored) { }
         if (pendingRoman.isEmpty() && pendingUrdu.isEmpty()) {
             releaseMic();
@@ -154,6 +163,16 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
             tts.stop();
             neuralActive = true;
             neural.speak(sentences, prefs.getString(KEY_NEURAL_VOICE, "Charon"), readKey());
+            // Speed guard: if the neural voice has not started speaking in
+            // 4.5 s, stop waiting and use the instant Android voice.
+            main.postDelayed(() -> {
+                if (seq != speechSeq || !neuralActive) return;
+                if (neural.hasPlayedAny()) return;
+                Log.w(TAG, "Neural voice slow; switching to system voice.");
+                neuralActive = false;
+                neural.stop();
+                tts.speak(pendingRoman, pendingUrdu);
+            }, NEURAL_START_TIMEOUT_MS);
             return;
         }
         neural.stop();
@@ -163,6 +182,7 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
 
     @JavascriptInterface
     public void stopSpeaking() {
+        speechSeq++;
         neural.stop();
         neuralActive = false;
         tts.stop();
@@ -626,7 +646,16 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
     @JavascriptInterface
     public boolean setApiKey(String key) {
         String k = key == null ? "" : key.trim();
+        if (k.length() >= 2 && k.charAt(0) == k.charAt(k.length() - 1)
+                && (k.charAt(0) == '"' || k.charAt(0) == '\'')) {
+            k = k.substring(1, k.length() - 1).trim();
+        }
         if (k.length() < 20) return false;
+        // Google now issues "AQ..." auth keys; only reject obvious garbage.
+        for (int i = 0; i < k.length(); i++) {
+            char c = k.charAt(i);
+            if (c < 33 || c > 126) return false;
+        }
         prefs.edit().putString(KEY_GEMINI, k).putBoolean(KEY_SEEDED, true).apply();
         return true;
     }
@@ -667,6 +696,7 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
         final int readTimeout = Math.max(6000, Math.min(20000, timeoutMs));
         new Thread(() -> {
             HttpURLConnection conn = null;
+            boolean reusable = false;
             try {
                 URL url = new URL("https://generativelanguage.googleapis.com/v1beta/models/"
                         + model + ":generateContent");
@@ -685,6 +715,7 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
                 int code = conn.getResponseCode();
                 InputStream stream = code >= 400 ? conn.getErrorStream() : conn.getInputStream();
                 String text = readAll(stream);
+                reusable = stream != null;
                 callJs("window.__jarvisHttp(" + q(requestId) + "," + code + "," + q(text) + ")");
             } catch (Exception e) {
                 String msg = e.toString();
@@ -692,7 +723,9 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
                 callJs("window.__jarvisHttp(" + q(requestId) + ",0," +
                         q("{\"error\":{\"message\":\"" + safe + "\",\"status\":\"TRANSPORT\"}}") + ")");
             } finally {
-                if (conn != null) conn.disconnect();
+                // Fully-read responses stay in the keep-alive pool, so the next
+                // command reuses the TLS connection instead of reconnecting.
+                if (conn != null && !reusable) conn.disconnect();
             }
         }, "jarvis-gemini").start();
     }
@@ -728,6 +761,7 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
         final URL url = target;
         new Thread(() -> {
             HttpURLConnection conn = null;
+            boolean reusable = false;
             try {
                 conn = (HttpURLConnection) url.openConnection();
                 conn.setRequestMethod(verb);
@@ -766,11 +800,12 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
                 int code = conn.getResponseCode();
                 InputStream stream = code >= 400 ? conn.getErrorStream() : conn.getInputStream();
                 String text = readAll(stream);
+                reusable = stream != null;
                 callJs("window.__jarvisHttpRaw(" + q(id) + "," + code + "," + q(text) + ")");
             } catch (Exception e) {
                 callJs("window.__jarvisHttpRaw(" + q(id) + ",0," + q("NETWORK: " + e) + ")");
             } finally {
-                if (conn != null) conn.disconnect();
+                if (conn != null && !reusable) conn.disconnect();
             }
         }, "jarvis-http").start();
     }
@@ -820,7 +855,7 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
 
     @JavascriptInterface
     public String version() {
-        return "1.6.0";
+        return "1.7.0";
     }
 
     @JavascriptInterface

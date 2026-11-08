@@ -1,5 +1,5 @@
-/* =====================================================================
-   J.A.R.V.I.S. MOBILE · app.js
+﻿/* =====================================================================
+   J.A.R.V.I.S. MOBILE Â· app.js
    Android WebView + Gemini + native voice bridge.
    ===================================================================== */
 'use strict';
@@ -11,7 +11,10 @@ const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const LS = {
   settings: 'jv.settings',
   memory: 'jv.memory',
-  history: 'jv.history'
+  history: 'jv.history',
+  // Last model that answered successfully. Trying it first avoids a wasted
+  // round trip when the newest model is unavailable on the user's key.
+  goodModel: 'jv.goodModel'
 };
 
 function loadJSON(key, fallback) {
@@ -39,7 +42,7 @@ function stripMarkdown(s) {
   return String(s || '')
     .replace(/```[\s\S]*?```/g, ' ')
     .replace(/[*_#`>]/g, '')
-    .replace(/^\s*[-•]\s+/gm, '')
+    .replace(/^\s*[-â€¢]\s+/gm, '')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -73,7 +76,7 @@ function detectLang(text) {
 const hasNative = typeof window.Android !== 'undefined';
 const Native = window.Android || {
   hasApiKey: () => !!localStorage.getItem('jv.key'),
-  getKeyMask: () => (localStorage.getItem('jv.key') || '').slice(0, 6) + '••••',
+  getKeyMask: () => (localStorage.getItem('jv.key') || '').slice(0, 6) + 'â€¢â€¢â€¢â€¢',
   setApiKey: (k) => { localStorage.setItem('jv.key', k); return true; },
   clearApiKey: () => localStorage.removeItem('jv.key'),
   getVoicePrefs: () => JSON.stringify({ gender: 'male', rate: 0.97, voice_name: '' }),
@@ -118,7 +121,7 @@ const Native = window.Android || {
   },
   executeTool: () => JSON.stringify({ ok: false, message: 'Native tools available nahi hain.' }),
   getStatus: () => JSON.stringify({ ok: true, data: { online: navigator.onLine, battery: -1, network: 'unknown' } }),
-  version: () => '1.6.0-web',
+  version: () => '1.7.0-web',
   deviceSummary: () => 'Browser',
   toast: (m) => window.jarvisToast && window.jarvisToast(m),
   vibrate: () => { },
@@ -171,6 +174,59 @@ const DEFAULTS = {
 const FAST_MODELS = ['gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-flash'];
 const SMART_MODELS = ['gemini-3.8-flash', 'gemini-2.5-pro', 'gemini-3.1-pro-preview'];
 
+// Tools whose result message is already the final spoken answer. Returning it
+// directly in Fast mode removes a whole extra Gemini round trip for commands
+// like "light on karo" or "YouTube kholo".
+const FAST_TERMINAL_TOOLS = new Set([
+  'open_url', 'youtube_search', 'youtube_channel', 'send_whatsapp', 'send_sms',
+  'call_number', 'compose_email', 'set_alarm', 'set_timer', 'navigate',
+  'set_volume', 'torch', 'share_text', 'open_play_store', 'install_app',
+  'smart_home', 'smart_scene', 'smart_home_setup', 'smart_home_help',
+  'news_brief', 'remember', 'device_status'
+]);
+// Opening an app can be the first step of a longer automation ("Instagram
+// kholo aur story post karo"), so only return it directly for short, simple
+// requests with no follow-up words.
+const FAST_SIMPLE_OPEN_TOOLS = new Set([
+  'open_app', 'open_gmail', 'open_inbox', 'open_settings'
+]);
+
+function isFastMode() {
+  return settings.model !== 'smart';
+}
+
+/** Gemini 3 uses thinkingLevel, Gemini 2.5 uses a thinkingBudget. */
+function thinkingConfigFor(model) {
+  if (/gemini-3/i.test(model)) return { thinkingLevel: 'low' };
+  if (/gemini-2\.5/i.test(model)) return { thinkingBudget: 0 };
+  return null;
+}
+
+function isSimpleActionText(text) {
+  const low = String(text || '').toLowerCase().trim();
+  if (!low || low.length > 90) return false;
+  return !/(\b(?:aur|phir|then|after|baad|bad|uske|next|step)\b|Ú©Û’ Ø¨Ø¹Ø¯|Ø§ÙˆØ±)/.test(low);
+}
+
+function directToolReply(results, simpleRequest) {
+  if (!isFastMode() || settings.langMode === 'en' || !simpleRequest) return '';
+  if (!results.length) return '';
+  for (const item of results) {
+    const name = item.name;
+    if (!FAST_TERMINAL_TOOLS.has(name) &&
+        !FAST_SIMPLE_OPEN_TOOLS.has(name)) return '';
+    if (!item.result || item.result.ok !== true) return '';
+    if (!item.result.message) return '';
+  }
+  const lines = [];
+  for (const item of results) {
+    const msg = String(item.result.message || '').trim();
+    if (msg && lines.indexOf(msg) < 0) lines.push(msg);
+  }
+  const text = lines.join(' ').trim();
+  return text.length > 900 ? '' : text;
+}
+
 // Fresh install: no personal facts are pre-loaded. Jarvis learns only what
 // the user chooses to tell it, and everything stays on the phone.
 const SEED_FACTS = [];
@@ -178,64 +234,64 @@ const SEED_FACTS = [];
 const LINES = {
   welcome: {
     roman: 'Jarvis online hai, sir. Boliye kya karna hai?',
-    urdu: 'جاروس آن لائن ہے، سر۔ بتائیے کیا کرنا ہے؟'
+    urdu: 'Ø¬Ø§Ø±ÙˆØ³ Ø¢Ù† Ù„Ø§Ø¦Ù† ÛÛ’ØŒ Ø³Ø±Û” Ø¨ØªØ§Ø¦ÛŒÛ’ Ú©ÛŒØ§ Ú©Ø±Ù†Ø§ ÛÛ’ØŸ'
   },
-  yesSir: { roman: 'Ji sir?', urdu: 'جی سر؟' },
-  stopped: { roman: 'Theek hai sir, ruk gaya.', urdu: 'ٹھیک ہے سر، رک گیا۔' },
+  yesSir: { roman: 'Ji sir?', urdu: 'Ø¬ÛŒ Ø³Ø±ØŸ' },
+  stopped: { roman: 'Theek hai sir, ruk gaya.', urdu: 'Ù¹Ú¾ÛŒÚ© ÛÛ’ Ø³Ø±ØŒ Ø±Ú© Ú¯ÛŒØ§Û”' },
   micOk: {
     roman: 'Mic theek kaam kar raha hai, sir.',
-    urdu: 'مائیک ٹھیک کام کر رہا ہے، سر۔'
+    urdu: 'Ù…Ø§Ø¦ÛŒÚ© Ù¹Ú¾ÛŒÚ© Ú©Ø§Ù… Ú©Ø± Ø±ÛØ§ ÛÛ’ØŒ Ø³Ø±Û”'
   },
   voiceLocked: {
     roman: "Sir, voice lock on hai. Pehle 'unlock voice' bolein ya settings mein Unlock dabaiye.",
-    urdu: 'سر، وائس لاک آن ہے۔ پہلے اَن لاک وائس بولیں یا سیٹنگز میں اَن لاک دبائیں۔'
+    urdu: 'Ø³Ø±ØŒ ÙˆØ§Ø¦Ø³ Ù„Ø§Ú© Ø¢Ù† ÛÛ’Û” Ù¾ÛÙ„Û’ Ø§ÙŽÙ† Ù„Ø§Ú© ÙˆØ§Ø¦Ø³ Ø¨ÙˆÙ„ÛŒÚº ÛŒØ§ Ø³ÛŒÙ¹Ù†Ú¯Ø² Ù…ÛŒÚº Ø§ÙŽÙ† Ù„Ø§Ú© Ø¯Ø¨Ø§Ø¦ÛŒÚºÛ”'
   },
-  male: { roman: 'Ji sir, male voice set hai.', urdu: 'جی سر، میل وائس سیٹ ہے۔' },
-  female: { roman: 'Ji sir, female voice set hai.', urdu: 'جی سر، فیمیل وائس سیٹ ہے۔' },
+  male: { roman: 'Ji sir, male voice set hai.', urdu: 'Ø¬ÛŒ Ø³Ø±ØŒ Ù…ÛŒÙ„ ÙˆØ§Ø¦Ø³ Ø³ÛŒÙ¹ ÛÛ’Û”' },
+  female: { roman: 'Ji sir, female voice set hai.', urdu: 'Ø¬ÛŒ Ø³Ø±ØŒ ÙÛŒÙ…ÛŒÙ„ ÙˆØ§Ø¦Ø³ Ø³ÛŒÙ¹ ÛÛ’Û”' },
   voiceUnlocked: {
     roman: 'Voice lock off. Ab aap male ya female voice chun sakte hain.',
-    urdu: 'وائس لاک آف۔ اب آپ میل یا فیمیل وائس چن سکتے ہیں۔'
+    urdu: 'ÙˆØ§Ø¦Ø³ Ù„Ø§Ú© Ø¢ÙÛ” Ø§Ø¨ Ø¢Ù¾ Ù…ÛŒÙ„ ÛŒØ§ ÙÛŒÙ…ÛŒÙ„ ÙˆØ§Ø¦Ø³ Ú†Ù† Ø³Ú©ØªÛ’ ÛÛŒÚºÛ”'
   },
   voiceLockedOn: {
     roman: 'Voice lock on. Awaaz wahi rahegi jo abhi hai.',
-    urdu: 'وائس لاک آن۔ آواز وہی رہے گی جو ابھی ہے۔'
+    urdu: 'ÙˆØ§Ø¦Ø³ Ù„Ø§Ú© Ø¢Ù†Û” Ø¢ÙˆØ§Ø² ÙˆÛÛŒ Ø±ÛÛ’ Ú¯ÛŒ Ø¬Ùˆ Ø§Ø¨Ú¾ÛŒ ÛÛ’Û”'
   },
-  enMode: { roman: 'English mode on.', urdu: 'انگلش موڈ آن۔' },
-  urMode: { roman: 'Roman Urdu mode on.', urdu: 'رومن اردو موڈ آن۔' },
-  bothMode: { roman: 'Both languages mode on.', urdu: 'دونوں زبانوں کا موڈ آن۔' },
-  memoryCleared: { roman: 'Memory saaf kar di, sir.', urdu: 'میموری صاف کر دی، سر۔' },
+  enMode: { roman: 'English mode on.', urdu: 'Ø§Ù†Ú¯Ù„Ø´ Ù…ÙˆÚˆ Ø¢Ù†Û”' },
+  urMode: { roman: 'Roman Urdu mode on.', urdu: 'Ø±ÙˆÙ…Ù† Ø§Ø±Ø¯Ùˆ Ù…ÙˆÚˆ Ø¢Ù†Û”' },
+  bothMode: { roman: 'Both languages mode on.', urdu: 'Ø¯ÙˆÙ†ÙˆÚº Ø²Ø¨Ø§Ù†ÙˆÚº Ú©Ø§ Ù…ÙˆÚˆ Ø¢Ù†Û”' },
+  memoryCleared: { roman: 'Memory saaf kar di, sir.', urdu: 'Ù…ÛŒÙ…ÙˆØ±ÛŒ ØµØ§Ù Ú©Ø± Ø¯ÛŒØŒ Ø³Ø±Û”' },
   help: {
     roman: 'Aap bol sakte hain: app kholo, YouTube ya Gmail kholo, WhatsApp message, alarm, timer, flashlight, volume, ghar ki light ya AC, movie mode, news sunao, ya koi bhi sawal. Settings mein voice, inbox aur smart home control hai.',
-    urdu: 'آپ بول سکتے ہیں: ایپ کھولو، یوٹیوب یا جیمیل کھولو، واٹس ایپ میسج، الارم، ٹائمر، فلیش لائٹ، والیوم، گھر کی لائٹ یا اے سی، مووی موڈ، نیوز سناؤ، یا کوئی بھی سوال۔ سیٹنگز میں وائس، ان باکس اور سمارٹ ہوم کنٹرول ہے۔'
+    urdu: 'Ø¢Ù¾ Ø¨ÙˆÙ„ Ø³Ú©ØªÛ’ ÛÛŒÚº: Ø§ÛŒÙ¾ Ú©Ú¾ÙˆÙ„ÙˆØŒ ÛŒÙˆÙ¹ÛŒÙˆØ¨ ÛŒØ§ Ø¬ÛŒÙ…ÛŒÙ„ Ú©Ú¾ÙˆÙ„ÙˆØŒ ÙˆØ§Ù¹Ø³ Ø§ÛŒÙ¾ Ù…ÛŒØ³Ø¬ØŒ Ø§Ù„Ø§Ø±Ù…ØŒ Ù¹Ø§Ø¦Ù…Ø±ØŒ ÙÙ„ÛŒØ´ Ù„Ø§Ø¦Ù¹ØŒ ÙˆØ§Ù„ÛŒÙˆÙ…ØŒ Ú¯Ú¾Ø± Ú©ÛŒ Ù„Ø§Ø¦Ù¹ ÛŒØ§ Ø§Û’ Ø³ÛŒØŒ Ù…ÙˆÙˆÛŒ Ù…ÙˆÚˆØŒ Ù†ÛŒÙˆØ² Ø³Ù†Ø§Ø¤ØŒ ÛŒØ§ Ú©ÙˆØ¦ÛŒ Ø¨Ú¾ÛŒ Ø³ÙˆØ§Ù„Û” Ø³ÛŒÙ¹Ù†Ú¯Ø² Ù…ÛŒÚº ÙˆØ§Ø¦Ø³ØŒ Ø§Ù† Ø¨Ø§Ú©Ø³ Ø§ÙˆØ± Ø³Ù…Ø§Ø±Ù¹ ÛÙˆÙ… Ú©Ù†Ù¹Ø±ÙˆÙ„ ÛÛ’Û”'
   },
-  bye: { roman: 'Theek hai sir, app band kar raha hoon.', urdu: 'ٹھیک ہے سر، ایپ بند کر رہا ہوں۔' },
+  bye: { roman: 'Theek hai sir, app band kar raha hoon.', urdu: 'Ù¹Ú¾ÛŒÚ© ÛÛ’ Ø³Ø±ØŒ Ø§ÛŒÙ¾ Ø¨Ù†Ø¯ Ú©Ø± Ø±ÛØ§ ÛÙˆÚºÛ”' },
   keyMissing: {
     roman: 'Sir, API key set nahi hai. Settings khol kar Gemini key daal dein.',
-    urdu: 'سر، اے پی آئی کی سیٹ نہیں ہے۔ سیٹنگز کھول کر جیمنی کی ڈال دیں۔'
+    urdu: 'Ø³Ø±ØŒ Ø§Û’ Ù¾ÛŒ Ø¢Ø¦ÛŒ Ú©ÛŒ Ø³ÛŒÙ¹ Ù†ÛÛŒÚº ÛÛ’Û” Ø³ÛŒÙ¹Ù†Ú¯Ø² Ú©Ú¾ÙˆÙ„ Ú©Ø± Ø¬ÛŒÙ…Ù†ÛŒ Ú©ÛŒ ÚˆØ§Ù„ Ø¯ÛŒÚºÛ”'
   },
   keyBad: {
     roman: 'Sir, Gemini API key theek nahi hai. Settings mein key check kijiye.',
-    urdu: 'سر، جیمنی اے پی آئی کی ٹھیک نہیں ہے۔ سیٹنگز میں کی چیک کیجیے۔'
+    urdu: 'Ø³Ø±ØŒ Ø¬ÛŒÙ…Ù†ÛŒ Ø§Û’ Ù¾ÛŒ Ø¢Ø¦ÛŒ Ú©ÛŒ Ù¹Ú¾ÛŒÚ© Ù†ÛÛŒÚº ÛÛ’Û” Ø³ÛŒÙ¹Ù†Ú¯Ø² Ù…ÛŒÚº Ú©ÛŒ Ú†ÛŒÚ© Ú©ÛŒØ¬ÛŒÛ’Û”'
   },
   quota: {
     roman: 'Sir, Gemini ki limit khatam ho gayi hai. Thori der baad koshish kijiye.',
-    urdu: 'سر، جیمنی کی لمٹ ختم ہو گئی ہے۔ تھوڑی دیر بعد کوشش کیجیے۔'
+    urdu: 'Ø³Ø±ØŒ Ø¬ÛŒÙ…Ù†ÛŒ Ú©ÛŒ Ù„Ù…Ù¹ Ø®ØªÙ… ÛÙˆ Ú¯Ø¦ÛŒ ÛÛ’Û” ØªÚ¾ÙˆÚ‘ÛŒ Ø¯ÛŒØ± Ø¨Ø¹Ø¯ Ú©ÙˆØ´Ø´ Ú©ÛŒØ¬ÛŒÛ’Û”'
   },
   server: {
     roman: 'Sir, Gemini ka server abhi slow hai, is liye jawab nahi aaya. Dobara bolein.',
-    urdu: 'سر، جیمنی کا سرور ابھی سست ہے، اس لیے جواب نہیں آیا۔ دوبارہ بولیں۔'
+    urdu: 'Ø³Ø±ØŒ Ø¬ÛŒÙ…Ù†ÛŒ Ú©Ø§ Ø³Ø±ÙˆØ± Ø§Ø¨Ú¾ÛŒ Ø³Ø³Øª ÛÛ’ØŒ Ø§Ø³ Ù„ÛŒÛ’ Ø¬ÙˆØ§Ø¨ Ù†ÛÛŒÚº Ø¢ÛŒØ§Û” Ø¯ÙˆØ¨Ø§Ø±Û Ø¨ÙˆÙ„ÛŒÚºÛ”'
   },
   network: {
     roman: 'Sir, internet connection nahi mil raha. Wi-Fi ya mobile data check kijiye.',
-    urdu: 'سر، انٹرنیٹ کنکشن نہیں مل رہا۔ وائی فائی یا موبائل ڈیٹا چیک کیجیے۔'
+    urdu: 'Ø³Ø±ØŒ Ø§Ù†Ù¹Ø±Ù†ÛŒÙ¹ Ú©Ù†Ú©Ø´Ù† Ù†ÛÛŒÚº Ù…Ù„ Ø±ÛØ§Û” ÙˆØ§Ø¦ÛŒ ÙØ§Ø¦ÛŒ ÛŒØ§ Ù…ÙˆØ¨Ø§Ø¦Ù„ ÚˆÛŒÙ¹Ø§ Ú†ÛŒÚ© Ú©ÛŒØ¬ÛŒÛ’Û”'
   },
   generic: {
     roman: 'Sir, ek masla aa gaya. Dobara bolein.',
-    urdu: 'سر، ایک مسئلہ آ گیا۔ دوبارہ بولیں۔'
+    urdu: 'Ø³Ø±ØŒ Ø§ÛŒÚ© Ù…Ø³Ø¦Ù„Û Ø¢ Ú¯ÛŒØ§Û” Ø¯ÙˆØ¨Ø§Ø±Û Ø¨ÙˆÙ„ÛŒÚºÛ”'
   },
   noSpeech: {
     roman: 'Sir, kuch samajh nahi aaya. Dobara bolein.',
-    urdu: 'سر، کچھ سمجھ نہیں آیا۔ دوبارہ بولیں۔'
+    urdu: 'Ø³Ø±ØŒ Ú©Ú†Ú¾ Ø³Ù…Ø¬Ú¾ Ù†ÛÛŒÚº Ø¢ÛŒØ§Û” Ø¯ÙˆØ¨Ø§Ø±Û Ø¨ÙˆÙ„ÛŒÚºÛ”'
   }
 };
 
@@ -1011,7 +1067,7 @@ function shConfigStatus() {
   const cfg = shLoadConfig();
   if (cfg.enabled && cfg.url) return 'Connected: ' + cfg.url + (cfg.token ? ' (token saved)' : '');
   if (cfg.url) return 'Saved but disabled: ' + cfg.url;
-  return 'Home Assistant not configured — virtual devices only.';
+  return 'Home Assistant not configured â€” virtual devices only.';
 }
 
 async function shHaTest() {
@@ -1162,7 +1218,7 @@ function updateMicUI() {
     if (orbEl) {
       orbEl.setAttribute('aria-pressed', state === 'listening' && !micMuted ? 'true' : 'false');
       orbEl.setAttribute('aria-label', micMuted ? 'Turn microphone on' : 'Talk to Jarvis');
-      orbEl.setAttribute('title', micMuted ? 'Mic off — tap to turn on' : 'Talk to Jarvis');
+      orbEl.setAttribute('title', micMuted ? 'Mic off â€” tap to turn on' : 'Talk to Jarvis');
     }
   } catch (e) { }
 }
@@ -1235,7 +1291,7 @@ function setState(next, label) {
   document.body.dataset.state = next;
   if (stateLabelEl) {
     const labels = {
-      idle: micMuted ? 'MIC OFF · TAP TO ON' : 'TAP TO SPEAK',
+      idle: micMuted ? 'MIC OFF Â· TAP TO ON' : 'TAP TO SPEAK',
       listening: 'SUN RAHA HOON...',
       thinking: 'SOCH RAHA HOON...',
       speaking: 'BOL RAHA HOON...'
@@ -1318,7 +1374,7 @@ function armListenSafety(ms) {
     try { Native.cancelListening(); } catch (e) { }
     setState('idle');
     transcript('');
-    toast('Awaaz nahi aayi — dobara bolein.');
+    toast('Awaaz nahi aayi â€” dobara bolein.');
   }, ms == null ? 15000 : ms);
 }
 
@@ -1403,7 +1459,7 @@ function addBubble(role, roman, urdu, meta) {
   }
   const m = document.createElement('span');
   m.className = 'meta';
-  m.textContent = (role === 'user' ? 'YOU' : 'JARVIS') + ' · ' + (meta || nowLabel());
+  m.textContent = (role === 'user' ? 'YOU' : 'JARVIS') + ' Â· ' + (meta || nowLabel());
   bubble.appendChild(m);
   wrap.appendChild(bubble);
   chatEl.appendChild(wrap);
@@ -1482,7 +1538,7 @@ function updateConnState() {
     return;
   }
   el.textContent = online
-    ? (settings.alwaysOn !== false ? 'ONLINE · BG' : 'ONLINE')
+    ? (settings.alwaysOn !== false ? 'ONLINE Â· BG' : 'ONLINE')
     : 'OFFLINE';
   el.classList.toggle('offline', !online);
 }
@@ -1553,8 +1609,8 @@ function callTool(name, args) {
 
 function toolLog(name, result) {
   const ok = result && result.ok;
-  const msg = result && result.message ? ' · ' + result.message : '';
-  addSystemLine('TOOL · ' + name + ' · ' + (ok ? 'OK' : 'FAIL') + msg, !ok);
+  const msg = result && result.message ? ' Â· ' + result.message : '';
+  addSystemLine('TOOL Â· ' + name + ' Â· ' + (ok ? 'OK' : 'FAIL') + msg, !ok);
   try { console.log('JARVIS_TOOL ' + name + ' ' + JSON.stringify(result)); } catch (e) { }
   try { Native.log('TOOL ' + name + ' ' + JSON.stringify(result)); } catch (e) { }
 }
@@ -1743,11 +1799,11 @@ function tryLocalOpen(low) {
     const nice = opened.map(w => w.replace(/\b\w/g, c => c.toUpperCase())).join(' aur ');
     en = 'Done sir, ' + opened.join(' and ') + ' opened.' + (failed.length ? ' ' + failed.join(', ') + ' not found.' : '');
     roman = 'Ji sir, ' + nice + ' khol diya.' + (failed.length ? ' ' + failed.join(', ') + ' nahi mila.' : '');
-    urdu = 'جی سر، کھول دیا ہے۔';
+    urdu = 'Ø¬ÛŒ Ø³Ø±ØŒ Ú©Ú¾ÙˆÙ„ Ø¯ÛŒØ§ ÛÛ’Û”';
   } else {
     en = 'Sir, ' + failed.join(', ') + ' is not installed.';
     roman = 'Sir, ' + failed.join(', ') + ' nahi mila.';
-    urdu = 'سر، وہ ایپ نہیں ملی۔';
+    urdu = 'Ø³Ø±ØŒ ÙˆÛ Ø§ÛŒÙ¾ Ù†ÛÛŒÚº Ù…Ù„ÛŒÛ”';
   }
   const line = replyFor(detectLang(low), en, roman, urdu);
   respond(line.roman, line.urdu);
@@ -1840,13 +1896,13 @@ async function localCommand(text) {
 
   if (/^(time|waqt) (kya|kitna)|what time|time batao/.test(low)) {
     const t = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-    const l = replyFor(lang, 'It is ' + t + ', sir.', 'Sir, abhi ' + t + ' baje hain.', 'سر، ابھی ' + t + ' بجے ہیں۔');
+    const l = replyFor(lang, 'It is ' + t + ', sir.', 'Sir, abhi ' + t + ' baje hain.', 'Ø³Ø±ØŒ Ø§Ø¨Ú¾ÛŒ ' + t + ' Ø¨Ø¬Û’ ÛÛŒÚºÛ”');
     respond(l.roman, l.urdu);
     return true;
   }
   if (/^(date|tarikh|aaj kya din)|what.*date|today.*date/.test(low)) {
     const d = new Date().toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
-    const l = replyFor(lang, 'Today is ' + d + ', sir.', 'Sir, aaj ' + d + ' hai.', 'سر، آج ' + d + ' ہے۔');
+    const l = replyFor(lang, 'Today is ' + d + ', sir.', 'Sir, aaj ' + d + ' hai.', 'Ø³Ø±ØŒ Ø¢Ø¬ ' + d + ' ÛÛ’Û”');
     respond(l.roman, l.urdu);
     return true;
   }
@@ -1856,14 +1912,14 @@ async function localCommand(text) {
       const d = st.data || {};
       const b = Number(d.battery);
       if (!(b >= 0)) {
-        respond('Sir, battery ka pata nahi chala.', 'سر، بیٹری کا پتہ نہیں چلا۔');
+        respond('Sir, battery ka pata nahi chala.', 'Ø³Ø±ØŒ Ø¨ÛŒÙ¹Ø±ÛŒ Ú©Ø§ Ù¾ØªÛ Ù†ÛÛŒÚº Ú†Ù„Ø§Û”');
         return true;
       }
       const ch = d.charging ? ' aur charge ho rahi hai' : '';
       const l = replyFor(lang,
         'Battery is ' + b + ' percent' + (d.charging ? ' and charging' : '') + ', sir.',
         'Sir, battery ' + b + ' percent hai' + ch + '.',
-        'سر، بیٹری ' + b + ' فیصد ہے' + (d.charging ? ' اور چارج ہو رہی ہے' : '') + '۔');
+        'Ø³Ø±ØŒ Ø¨ÛŒÙ¹Ø±ÛŒ ' + b + ' ÙÛŒØµØ¯ ÛÛ’' + (d.charging ? ' Ø§ÙˆØ± Ú†Ø§Ø±Ø¬ ÛÙˆ Ø±ÛÛŒ ÛÛ’' : '') + 'Û”');
       respond(l.roman, l.urdu);
     } catch (e) { respond(LINES.generic.roman, LINES.generic.urdu); }
     return true;
@@ -1875,7 +1931,7 @@ async function localCommand(text) {
     const r = callTool('set_volume', { percent: pct });
     toolLog('set_volume', r);
     if (r.ok) {
-      const l = replyFor(lang, 'Volume set to ' + pct + ' percent, sir.', 'Sir, volume ' + pct + ' percent kar diya.', 'سر، والیوم ' + pct + ' فیصد کر دیا۔');
+      const l = replyFor(lang, 'Volume set to ' + pct + ' percent, sir.', 'Sir, volume ' + pct + ' percent kar diya.', 'Ø³Ø±ØŒ ÙˆØ§Ù„ÛŒÙˆÙ… ' + pct + ' ÙÛŒØµØ¯ Ú©Ø± Ø¯ÛŒØ§Û”');
       respond(l.roman, l.urdu);
     } else {
       respond(r.message || 'Volume change nahi hua, sir.', LINES.generic.urdu);
@@ -1886,7 +1942,7 @@ async function localCommand(text) {
     const r = callTool('set_volume', { direction: 'up' });
     toolLog('set_volume', r);
     if (r.ok) {
-      const l = replyFor(lang, 'Volume up, sir.', 'Volume barha diya, sir.', 'والیوم بڑھا دیا، سر۔');
+      const l = replyFor(lang, 'Volume up, sir.', 'Volume barha diya, sir.', 'ÙˆØ§Ù„ÛŒÙˆÙ… Ø¨Ú‘Ú¾Ø§ Ø¯ÛŒØ§ØŒ Ø³Ø±Û”');
       respond(l.roman, l.urdu);
     } else {
       respond(r.message || 'Volume barha nahi saka, sir.', LINES.generic.urdu);
@@ -1897,7 +1953,7 @@ async function localCommand(text) {
     const r = callTool('set_volume', { direction: 'down' });
     toolLog('set_volume', r);
     if (r.ok) {
-      const l = replyFor(lang, 'Volume down, sir.', 'Volume kam kar diya, sir.', 'والیوم کم کر دیا، سر۔');
+      const l = replyFor(lang, 'Volume down, sir.', 'Volume kam kar diya, sir.', 'ÙˆØ§Ù„ÛŒÙˆÙ… Ú©Ù… Ú©Ø± Ø¯ÛŒØ§ØŒ Ø³Ø±Û”');
       respond(l.roman, l.urdu);
     } else {
       respond(r.message || 'Volume kam nahi kar saka, sir.', LINES.generic.urdu);
@@ -1908,7 +1964,7 @@ async function localCommand(text) {
     const r = callTool('set_volume', { direction: 'mute' });
     toolLog('set_volume', r);
     if (r.ok) {
-      const l = replyFor(lang, 'Muted, sir.', 'Volume mute kar diya, sir.', 'والیوم خاموش کر دیا، سر۔');
+      const l = replyFor(lang, 'Muted, sir.', 'Volume mute kar diya, sir.', 'ÙˆØ§Ù„ÛŒÙˆÙ… Ø®Ø§Ù…ÙˆØ´ Ú©Ø± Ø¯ÛŒØ§ØŒ Ø³Ø±Û”');
       respond(l.roman, l.urdu);
     } else {
       respond(r.message || 'Mute nahi hua, sir.', LINES.generic.urdu);
@@ -1923,7 +1979,7 @@ async function localCommand(text) {
     const l = replyFor(lang,
       sceneName + ' scene applied, sir.',
       'Ji sir, ' + sceneName + ' scene set kar diya.',
-      'جی سر، ' + sceneName + ' سین سیٹ کر دیا۔');
+      'Ø¬ÛŒ Ø³Ø±ØŒ ' + sceneName + ' Ø³ÛŒÙ† Ø³ÛŒÙ¹ Ú©Ø± Ø¯ÛŒØ§Û”');
     respond(l.roman, l.urdu);
     return true;
   }
@@ -1944,7 +2000,7 @@ async function localCommand(text) {
     toolLog('torch', r);
     if (r.ok) {
       torchOn = true;
-      const l = replyFor(lang, 'Flashlight on, sir.', 'Flashlight on kar di, sir.', 'فلیش لائٹ آن کر دی، سر۔');
+      const l = replyFor(lang, 'Flashlight on, sir.', 'Flashlight on kar di, sir.', 'ÙÙ„ÛŒØ´ Ù„Ø§Ø¦Ù¹ Ø¢Ù† Ú©Ø± Ø¯ÛŒØŒ Ø³Ø±Û”');
       respond(l.roman, l.urdu);
     } else {
       respond(r.message || 'Flashlight on nahi ho saka, sir.', LINES.generic.urdu);
@@ -1956,7 +2012,7 @@ async function localCommand(text) {
     toolLog('torch', r);
     if (r.ok) {
       torchOn = false;
-      const l = replyFor(lang, 'Flashlight off, sir.', 'Flashlight off kar di, sir.', 'فلیش لائٹ بند کر دی، سر۔');
+      const l = replyFor(lang, 'Flashlight off, sir.', 'Flashlight off kar di, sir.', 'ÙÙ„ÛŒØ´ Ù„Ø§Ø¦Ù¹ Ø¨Ù†Ø¯ Ú©Ø± Ø¯ÛŒØŒ Ø³Ø±Û”');
       respond(l.roman, l.urdu);
     } else {
       respond(r.message || 'Flashlight off nahi ho saka, sir.', LINES.generic.urdu);
@@ -2290,8 +2346,11 @@ function buildSystemPrompt() {
       ? 'The user chose ROMAN URDU. Reply in natural Pakistani Roman Urdu (simple everyday words, like a friend talking), and give the same in Urdu script.'
       : 'Match the user: English input -> English reply; Roman Urdu / Urdu / Hindi input -> natural Pakistani Roman Urdu reply. The ROMAN line must sound like a real Pakistani person talking casually, never like an English sentence with Urdu words pasted in.';
 
-  const facts = (memory.facts || []).length
-    ? memory.facts.map(f => '- ' + f).join('\n')
+  // Fast mode sends only the most recent facts: a long prompt delays every
+  // reply. Smart mode keeps the full list for deeper questions.
+  const factList = isFastMode() ? (memory.facts || []).slice(-12) : (memory.facts || []);
+  const facts = factList.length
+    ? factList.map(f => '- ' + f).join('\n')
     : '- (nothing saved yet)';
 
   let automation = false;
@@ -2304,7 +2363,7 @@ function buildSystemPrompt() {
   });
 
   return [
-    'You are J.A.R.V.I.S. ("Jarvis"), the user\'s personal Android assistant — the same Jarvis as on their PC, now inside their phone. Call the user "sir".',
+    'You are J.A.R.V.I.S. ("Jarvis"), the user\'s personal Android assistant â€” the same Jarvis as on their PC, now inside their phone. Call the user "sir".',
     'PERSONALITY: warm, quick-witted, calm, extremely capable. When asked for advice give ONE clear recommendation with a short reason, never "it depends". One short follow-up question only if it truly helps.',
     'You are the MOBILE version: you control this phone, not a PC. For PC-only things (desktop files, Word) say it in one short line and offer the phone alternative.',
     'THINK FIRST: the user speaks English and Roman Urdu and speech recognition makes mistakes ("jaadui", "travis" = Jarvis; wrong app/song names). Infer the real intent. Resolve "isko", "woh", "yahan" from the conversation and from ui_dump.',
@@ -2315,8 +2374,8 @@ function buildSystemPrompt() {
     'NEWS: news_brief reads live Google News headlines with no API key. Use it for "news sunao" or "latest news about cricket". Read only what it returned; never invent headlines.',
     'INSTALL: for "X install karo" call install_app ONCE with the exact app name, not open_play_store too. Wait for the result and report exactly what happened.',
     'AUTOMATION: ' + (automation
-      ? 'ON — you can tap through other apps. Use ui_dump before tapping.'
-      : 'OFF — ui_click / ui_type / ui_dump / system_action and full install will ask the user to enable it. App opens, Play Store search and normal tools still work.'),
+      ? 'ON â€” you can tap through other apps. Use ui_dump before tapping.'
+      : 'OFF â€” ui_click / ui_type / ui_dump / system_action and full install will ask the user to enable it. App opens, Play Store search and normal tools still work.'),
     'MEMORY: when the user shares something lasting or says "yaad rakho", call remember with a short English fact. Never read the list out.',
     'SPEED AND STYLE: your answer is spoken aloud. Answer the question asked, do not pad. Actions: 1-2 short sentences. Questions: up to 4 short sentences. No lists, markdown, emojis or stage directions.',
     'MEMORY (about the user):',
@@ -2362,7 +2421,8 @@ window.__jarvisHttp = function (id, code, body) {
   }
 };
 
-function geminiRequest(model, payload) {
+function geminiRequest(model, payload, timeoutMs) {
+  const limit = Math.max(5000, Math.min(20000, timeoutMs || 12000));
   return new Promise((resolve, reject) => {
     const id = 'r' + (++reqSeq);
     const timer = setTimeout(() => {
@@ -2373,11 +2433,11 @@ function geminiRequest(model, payload) {
         err.timeout = true;
         reject(err);
       }
-    }, 13000);
+    }, limit + 1000);
     pendingRequests[id] = { resolve, reject, timer };
     try { Native.log('HTTP_SEND ' + id + ' ' + model); } catch (e) { }
     try {
-      Native.httpGemini(id, model, JSON.stringify(payload), 12000);
+      Native.httpGemini(id, model, JSON.stringify(payload), limit);
     } catch (e) {
       delete pendingRequests[id];
       clearTimeout(timer);
@@ -2414,16 +2474,38 @@ async function runTool(name, args) {
   return callTool(name, args || {});
 }
 
-async function toolLoop(model, baseContents, systemPrompt) {
+async function toolLoop(model, baseContents, systemPrompt, simpleRequest) {
   const contents = baseContents.map(c => JSON.parse(JSON.stringify(c)));
+  const fast = isFastMode();
+  const requestTimeout = fast ? 8000 : 12000;
+  const maxOutputTokens = fast ? 480 : 900;
+  let useThinking = fast;
   for (let round = 0; round < 8; round++) {
+    const generationConfig = {
+      temperature: fast ? 0.45 : 0.55,
+      maxOutputTokens
+    };
+    const think = useThinking ? thinkingConfigFor(model) : null;
+    if (think) generationConfig.thinkingConfig = think;
     const payload = {
       systemInstruction: { parts: [{ text: systemPrompt }] },
       contents,
       tools: [{ functionDeclarations: toolDeclarations() }],
-      generationConfig: { temperature: 0.55, maxOutputTokens: 900 }
+      generationConfig
     };
-    const raw = await geminiRequest(model, payload);
+    let raw;
+    try {
+      raw = await geminiRequest(model, payload, requestTimeout);
+    } catch (e) {
+      // Some keys/models reject thinkingConfig. Retry once without it instead
+      // of failing the whole command.
+      if (think && round === 0 && String(e.status || '').indexOf('INVALID_ARGUMENT') >= 0) {
+        useThinking = false;
+        round--;
+        continue;
+      }
+      throw e;
+    }
     let data;
     try { data = JSON.parse(raw); } catch (e) { throw new Error('Gemini ne ghalat jawab bheja.'); }
     if (data.promptFeedback && data.promptFeedback.blockReason) {
@@ -2437,6 +2519,7 @@ async function toolLoop(model, baseContents, systemPrompt) {
     if (calls.length) {
       contents.push({ role: 'model', parts });
       const responses = [];
+      const results = [];
       for (const part of calls) {
         const fc = part.functionCall;
         let result;
@@ -2446,8 +2529,13 @@ async function toolLoop(model, baseContents, systemPrompt) {
           result = { ok: false, message: 'Tool error: ' + e };
         }
         toolLog(fc.name, result);
+        results.push({ name: fc.name, result });
         responses.push({ functionResponse: { name: fc.name, response: result } });
       }
+      // Fast path: the tool already produced the exact sentence to speak, so
+      // skip the second Gemini call that used to add 2-4 seconds.
+      const direct = directToolReply(results, simpleRequest);
+      if (direct) return 'ROMAN: ' + direct;
       contents.push({ role: 'user', parts: responses });
       continue;
     }
@@ -2460,29 +2548,42 @@ async function toolLoop(model, baseContents, systemPrompt) {
 }
 
 async function askBrain(userText) {
+  const fast = isFastMode();
   // Short history keeps the request small: a big prompt was the main reason
-  // replies took several seconds. 10 turns is plenty of context for speech.
-  const contents = history.slice(-10).map(item => ({
+  // replies took several seconds. Fast mode needs far less context for speech.
+  const turns = fast ? 6 : 10;
+  const chars = fast ? 450 : 700;
+  const contents = history.slice(-turns).map(item => ({
     role: item.role === 'user' ? 'user' : 'model',
-    parts: [{ text: String(item.text || '').slice(0, 700) }]
+    parts: [{ text: String(item.text || '').slice(0, chars) }]
   }));
   if (!contents.length || contents[contents.length - 1].role !== 'user') {
     contents.push({ role: 'user', parts: [{ text: userText }] });
   }
   const systemPrompt = buildSystemPrompt();
   const models = settings.model === 'smart' ? SMART_MODELS : FAST_MODELS;
+  let ordered = models;
+  try {
+    const cached = localStorage.getItem(LS.goodModel) || '';
+    if (cached && models.indexOf(cached) >= 0) {
+      ordered = [cached].concat(models.filter(m => m !== cached));
+    }
+  } catch (e) { }
+  const simpleRequest = isSimpleActionText(userText);
   const started = Date.now();
+  const budget = fast ? 14000 : 18000;
   let last = null;
 
-  for (const model of models) {
-    if (Date.now() - started > 18000) break;
+  for (const model of ordered) {
+    if (Date.now() - started > budget) break;
     try { Native.log('ASK ' + model); } catch (e) { }
     try {
-      return await toolLoop(model, contents, systemPrompt);
+      const reply = await toolLoop(model, contents, systemPrompt, simpleRequest);
+      try { localStorage.setItem(LS.goodModel, model); } catch (e) { }
+      return reply;
     } catch (e) {
       last = e;
       if (e.code === 401 || e.code === 403 || e.code === 429) break;
-      if (String(e.status || '').indexOf('INVALID_ARGUMENT') >= 0) break;
       // 404 (model gone), 500/503/504, timeout: try the next model.
     }
   }
@@ -2514,7 +2615,7 @@ function errorReply(err) {
            /deadline|overloaded|unavailable|timed out|timeout/.test(msg)) line = LINES.server;
   else if ((err && err.network) || /unknownhost|no address|connection refused|network is unreachable|ssl|certificate/.test(msg)) line = LINES.network;
 
-  addSystemLine('ERROR · ' + ((err && err.message) || 'unknown'), true);
+  addSystemLine('ERROR Â· ' + ((err && err.message) || 'unknown'), true);
   try { Native.log('ERR ' + ((err && (err.status + ' ' + err.message)) || 'unknown')); } catch (e) { }
   respond(line.roman, line.urdu);
 }
@@ -2613,8 +2714,8 @@ function renderSettings() {
   const bgState = $('#bgState');
   if (bgState) {
     bgState.textContent = settings.alwaysOn !== false
-      ? 'ON — app band karne ke baad bhi “Hey Jarvis” sunta rahega (notification rehti hai).'
-      : 'Off — sirf app khuli ho tab sunta hai.';
+      ? 'ON â€” app band karne ke baad bhi â€œHey Jarvisâ€ sunta rahega (notification rehti hai).'
+      : 'Off â€” sirf app khuli ho tab sunta hai.';
   }
 
   const keyHint = $('#keyHint');
@@ -2628,7 +2729,7 @@ function renderSettings() {
   if (notifState) {
     let ok = false;
     try { ok = Native.hasNotificationAccess(); } catch (e) { }
-    notifState.textContent = ok ? 'Permission ON — inbox summary ready.' : 'Permission nahi hai.';
+    notifState.textContent = ok ? 'Permission ON â€” inbox summary ready.' : 'Permission nahi hai.';
   }
 
   const urduHint = $('#urduVoiceHint');
@@ -2647,7 +2748,7 @@ function renderSettings() {
   const neuralHint = $('#neuralHint');
   if (neuralHint) {
     neuralHint.textContent = settings.neuralVoice === false
-      ? 'Neural voice off — Android ki default awaaz.'
+      ? 'Neural voice off â€” Android ki default awaaz.'
       : 'Neural voice: ' + (settings.neuralVoiceName || 'Charon') + ' (Gemini TTS)';
   }
 
@@ -2657,8 +2758,8 @@ function renderSettings() {
     let on = false;
     try { on = !!Native.hasAutomation(); } catch (e) { }
     autoState.textContent = on
-      ? 'ON — Jarvis khud buttons dabata hai, Play Store install bhi.'
-      : 'Off hai — Play Store install aur screen taps ke liye on karein.';
+      ? 'ON â€” Jarvis khud buttons dabata hai, Play Store install bhi.'
+      : 'Off hai â€” Play Store install aur screen taps ke liye on karein.';
     if (autoBtn) autoBtn.textContent = on ? 'Settings' : 'Enable';
   }
 
@@ -2672,7 +2773,7 @@ function renderSettings() {
   if (haToken) {
     let saved = false;
     try { saved = !!shLoadConfig().token; } catch (e) { }
-    haToken.placeholder = saved ? 'Token saved — leave blank to keep' : 'Long-lived access token (optional)';
+    haToken.placeholder = saved ? 'Token saved â€” leave blank to keep' : 'Long-lived access token (optional)';
   }
 
   const memCount = $('#memoryCount');
@@ -2683,7 +2784,7 @@ function renderSettings() {
     let v = '1.2.0';
     let d = 'Android';
     try { v = Native.version(); d = Native.deviceSummary(); } catch (e) { }
-    about.textContent = 'Jarvis Mobile ' + v + ' · ' + d;
+    about.textContent = 'Jarvis Mobile ' + v + ' Â· ' + d;
   }
 }
 
@@ -2734,7 +2835,7 @@ function saveSetupKey() {
   try { ok = Native.setApiKey(key); } catch (e) { ok = false; }
   if (!ok) {
     const hint = $('#setupKeyStatus');
-    if (hint) hint.textContent = 'Key theek nahi lag rahi — AIza se shuru honi chahiye.';
+    if (hint) hint.textContent = 'Key theek nahi lag rahi - pura key paste karein (AIza... ya AQ...).';
     toast('Key theek nahi lag rahi.');
     return;
   }
@@ -2818,7 +2919,7 @@ function renderMemory() {
     const span = document.createElement('span');
     span.textContent = fact;
     const del = document.createElement('button');
-    del.textContent = '✕';
+    del.textContent = 'âœ•';
     del.setAttribute('aria-label', 'Delete');
     del.onclick = () => {
       memory.facts.splice(index, 1);
@@ -2897,15 +2998,15 @@ function renderVoices(attempt) {
     const b = document.createElement('button');
     b.className = 'voice-item' + (settings.voiceName === v.name ? ' active' : '');
     const name = document.createElement('b');
-    name.textContent = (v.gender === 'male' ? '♂ ' : v.gender === 'female' ? '♀ ' : '') +
+    name.textContent = (v.gender === 'male' ? 'â™‚ ' : v.gender === 'female' ? 'â™€ ' : '') +
       (v.name || 'voice');
     const small = document.createElement('small');
-    small.textContent = v.locale + ' · q' + (v.quality || 0) + (v.network ? ' · network' : ' · offline');
+    small.textContent = v.locale + ' Â· q' + (v.quality || 0) + (v.network ? ' Â· network' : ' Â· offline');
     b.appendChild(name);
     b.appendChild(small);
     b.onclick = () => {
       if (settings.voiceLocked && v.gender === 'female') {
-        toast('Voice lock ON hai — pehle Unlock karein.');
+        toast('Voice lock ON hai â€” pehle Unlock karein.');
         return;
       }
       settings.voiceName = v.name || '';
@@ -2914,7 +3015,7 @@ function renderVoices(attempt) {
       renderSettings();
       renderVoices();
       toast('Voice chun li: ' + (v.name || v.locale));
-      try { Native.speak('Ji sir, yeh meri nayi awaaz hai.', 'جی سر، یہ میری نئی آواز ہے۔'); } catch (e) { }
+      try { Native.speak('Ji sir, yeh meri nayi awaaz hai.', 'Ø¬ÛŒ Ø³Ø±ØŒ ÛŒÛ Ù…ÛŒØ±ÛŒ Ù†Ø¦ÛŒ Ø¢ÙˆØ§Ø² ÛÛ’Û”'); } catch (e) { }
     };
     list.appendChild(b);
   });
@@ -2967,7 +3068,7 @@ window.jarvisNative = {
     if (state === 'speaking') finishSpeaking();
   },
   onTtsError(message) {
-    if (message) addSystemLine('VOICE · ' + message, true);
+    if (message) addSystemLine('VOICE Â· ' + message, true);
     if (state === 'speaking') finishSpeaking();
   },
   onSpeechReady() {
@@ -3001,7 +3102,7 @@ window.jarvisNative = {
     if (!Array.isArray(alts)) alts = [];
     const heard = chooseHeard(text || '', alts);
     let command = heard || '';
-    transcript('“' + command + '”');
+    transcript('â€œ' + command + 'â€');
     try {
       Native.log('HEARD ' + JSON.stringify({ raw: text || '', chosen: command, alts: alts.slice(0, 8) }));
     } catch (e) { }
@@ -3043,7 +3144,7 @@ window.jarvisNative = {
       setState('idle');
       transcript('');
       if (settings.handsFree) scheduleListen(700);
-      else toast('Kuch samajh nahi aaya — dobara bolein.');
+      else toast('Kuch samajh nahi aaya â€” dobara bolein.');
       return;
     }
     setState('idle');
@@ -3234,7 +3335,7 @@ function bindEvents() {
     settings.neuralVoice = !!e.target.checked;
     saveSettings();
     renderSettings();
-    toast(settings.neuralVoice ? 'Neural voice ON — PC jaisi awaaz.' : 'Neural voice OFF — Android voice.');
+    toast(settings.neuralVoice ? 'Neural voice ON â€” PC jaisi awaaz.' : 'Neural voice OFF â€” Android voice.');
   });
   const neuralVoice = $('#neuralVoice');
   if (neuralVoice) neuralVoice.addEventListener('change', e => {
@@ -3296,7 +3397,7 @@ function bindEvents() {
       Native.setAlwaysOn(settings.alwaysOn !== false);
     } catch (err) { }
     if (settings.handsFree) {
-      toast('Hands-free ON. “Hey Jarvis” bolein.');
+      toast('Hands-free ON. â€œHey Jarvisâ€ bolein.');
       if (!micMuted) {
         try { Native.holdListening(false); } catch (err) { }
         if (state === 'idle') startListening(false);
@@ -3312,7 +3413,7 @@ function bindEvents() {
   if (alwaysOn) alwaysOn.addEventListener('change', e => {
     applyBackground(!!e.target.checked);
     renderSettings();
-    toast(settings.alwaysOn ? 'Background mode ON — hamesha online.' : 'Background mode OFF.');
+    toast(settings.alwaysOn ? 'Background mode ON â€” hamesha online.' : 'Background mode OFF.');
   });
   $('#wakeToggle').addEventListener('change', e => {
     settings.wakeRequired = !!e.target.checked;
@@ -3416,7 +3517,7 @@ function testVoice() {
   const roman = settings.voiceGender === 'female'
     ? 'Ji sir, yeh female voice hai. Main Jarvis hoon.'
     : 'Ji sir, yeh male voice hai. Main Jarvis hoon.';
-  const urdu = 'جی سر، یہ میری آواز ہے۔ میں جاروس ہوں۔';
+  const urdu = 'Ø¬ÛŒ Ø³Ø±ØŒ ÛŒÛ Ù…ÛŒØ±ÛŒ Ø¢ÙˆØ§Ø² ÛÛ’Û” Ù…ÛŒÚº Ø¬Ø§Ø±ÙˆØ³ ÛÙˆÚºÛ”';
   try { Native.speak(roman, urdu); } catch (e) { toast('Voice output fail hua.'); }
 }
 
