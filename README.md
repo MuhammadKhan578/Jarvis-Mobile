@@ -28,6 +28,11 @@ APK with the Android SDK command-line tools.
   Instagram, Maps, Camera, Settings, Calculator, Clock, and more).
 - Handles calls, SMS drafts, alarms, timers, flashlight, volume, battery,
   Wi-Fi/Bluetooth settings, and web searches.
+- **Smart home control** for lights, fans, AC, TV, doors, blinds, coffee machine
+  and plugs, plus one-word scenes (morning, movie, sleep, guest, work, away,
+  party). The built-in virtual home works with no setup; optional Home Assistant
+  connection for real devices.
+- **News briefings** from Google News with no extra API key.
 - Optional Gmail inbox summaries through Notification Access.
 - Long-term memory saved on the phone, and a much more natural conversation
   style (short spoken answers, real opinions, follows up like the PC Jarvis).
@@ -66,6 +71,39 @@ asks you to tap Install.
 The service never reads passwords. It only looks at visible text/buttons while
 performing a task. Turn it off any time in Android Accessibility settings.
 
+## Smart home
+
+Jarvis ships with a complete **virtual home**, so nothing extra is required to
+try it. Say commands like:
+
+- *"drawing room ki light on karo"* / *"bedroom AC 22 degree"*
+- *"TV band karo"*, *"main door lock karo"*, *"kitchen blinds kholo"*
+- *"coffee machine on karo"*, *"iron plug off karo"*
+- *"movie mode"*, *"good night"*, *"mehman mode"*, *"bahar ja raha hoon"*
+- *"ghar ka status batao"*
+
+Devices: lights (drawing room, bedroom, kitchen, bathroom, study, garden), fans
+(bedroom, drawing room), ACs (bedroom, drawing room), TV, main/back doors,
+blinds (drawing room, bedroom, kitchen), coffee machine, charger and iron plugs.
+States are saved in the WebView's local storage on the phone.
+
+### Optional Home Assistant
+
+Open **Settings > SMART HOME**, enter your Home Assistant URL (for example
+`http://192.168.1.10:8123`) and a long-lived access token, then tap **Save &
+connect**. Jarvis mirrors every command to the real devices and can import their
+state with *"sync home"*. Plain `http://` is accepted only for local/private
+addresses; public URLs must use `https://`.
+
+Without Home Assistant everything still works locally, so the feature never
+blocks the rest of the assistant.
+
+## News
+
+Say *"news sunao"*, *"aaj ki khabar"* or *"latest news about cricket"*. Jarvis
+reads Google News RSS and needs no NewsAPI/OpenWeatherMap account. Headlines are
+cached for five minutes to avoid repeat downloads.
+
 ## Build the APK
 
 Requirements:
@@ -90,7 +128,7 @@ powershell -ExecutionPolicy Bypass -File .\build_apk.ps1 `
   -Sdk "C:\Android\Sdk" -Jdk "C:\Program Files\Java\jdk-17"
 ```
 
-Output: `JarvisMobile.apk` in this folder. Version 1.5.0 (versionCode 6).
+Output: `JarvisMobile.apk` in this folder. Version 1.6.0 (versionCode 7).
 
 On the first build the script creates a local development keystore at
 `keystore/jarvis.keystore` with a random password saved in
@@ -132,6 +170,8 @@ The package name is `com.jarvis.mobile`.
 
 - The API key lives in app-private SharedPreferences.
 - Memory notes and settings live in the WebView's local storage on the phone.
+- Smart-home state and an optional Home Assistant token stay in that local
+  storage; the token is sent only to the Home Assistant URL you enter.
 - Notification Access is optional and used only for Gmail summaries.
 - The accessibility service runs only while a Jarvis automation task is active.
 - This repository contains no API keys, keystores, logs, or personal data.

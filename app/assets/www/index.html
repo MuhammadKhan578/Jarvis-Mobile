@@ -40,8 +40,8 @@
       <div class="welcome-tips">
         <span>“jarvis brave kholo”</span>
         <span>“Play Store se Duolingo install karo”</span>
-        <span>“YouTube par Tech Master kholo”</span>
-        <span>“10 minute ka timer lagao”</span>
+        <span>“movie mode chalao”</span>
+        <span>“news sunao”</span>
       </div>
     </section>
   </main>
@@ -222,6 +222,23 @@
     </div>
 
     <div class="set-group">
+      <div class="set-title">SMART HOME</div>
+      <div class="hint" id="shState">Home Assistant not configured — virtual devices only.</div>
+      <div class="key-row">
+        <input id="haUrl" type="text" placeholder="http://192.168.1.10:8123" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="key-row">
+        <input id="haToken" type="password" placeholder="Long-lived access token (optional)" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="btn-row">
+        <button id="haSave" class="mini-btn">Save &amp; connect</button>
+        <button id="haTest" class="mini-btn">Test</button>
+        <button id="haDisable" class="mini-btn">Disable</button>
+      </div>
+      <p class="hint">Lights, fans, AC, TV, doors, blinds, coffee and plugs ghar mein virtual hain — bina setup chalte hain. Bolein “movie mode”, “ghar ka status” ya “news sunao”.</p>
+    </div>
+
+    <div class="set-group">
       <div class="row">
         <div>
           <b>Memory</b>
@@ -233,7 +250,7 @@
 
     <div class="set-group about">
       <div class="set-title">ABOUT</div>
-      <p class="hint" id="aboutText">Jarvis Mobile 1.5.0</p>
+      <p class="hint" id="aboutText">Jarvis Mobile 1.6.0</p>
       <p class="hint">Android 14–17 · background always-on · Gemini cloud brain · neural voice.</p>
     </div>
   </div>

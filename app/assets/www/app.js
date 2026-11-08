@@ -118,7 +118,7 @@ const Native = window.Android || {
   },
   executeTool: () => JSON.stringify({ ok: false, message: 'Native tools available nahi hain.' }),
   getStatus: () => JSON.stringify({ ok: true, data: { online: navigator.onLine, battery: -1, network: 'unknown' } }),
-  version: () => '1.5.0-web',
+  version: () => '1.6.0-web',
   deviceSummary: () => 'Browser',
   toast: (m) => window.jarvisToast && window.jarvisToast(m),
   vibrate: () => { },
@@ -205,8 +205,8 @@ const LINES = {
   bothMode: { roman: 'Both languages mode on.', urdu: 'دونوں زبانوں کا موڈ آن۔' },
   memoryCleared: { roman: 'Memory saaf kar di, sir.', urdu: 'میموری صاف کر دی، سر۔' },
   help: {
-    roman: 'Aap bol sakte hain: app kholo, YouTube ya Gmail kholo, WhatsApp message, alarm, timer, flashlight, volume, ya koi bhi sawal. Settings mein voice aur inbox control hai.',
-    urdu: 'آپ بول سکتے ہیں: ایپ کھولو، یوٹیوب یا جیمیل کھولو، واٹس ایپ میسج، الارم، ٹائمر، فلیش لائٹ، والیوم، یا کوئی بھی سوال۔ سیٹنگز میں وائس اور ان باکس کنٹرول ہے۔'
+    roman: 'Aap bol sakte hain: app kholo, YouTube ya Gmail kholo, WhatsApp message, alarm, timer, flashlight, volume, ghar ki light ya AC, movie mode, news sunao, ya koi bhi sawal. Settings mein voice, inbox aur smart home control hai.',
+    urdu: 'آپ بول سکتے ہیں: ایپ کھولو، یوٹیوب یا جیمیل کھولو، واٹس ایپ میسج، الارم، ٹائمر، فلیش لائٹ، والیوم، گھر کی لائٹ یا اے سی، مووی موڈ، نیوز سناؤ، یا کوئی بھی سوال۔ سیٹنگز میں وائس، ان باکس اور سمارٹ ہوم کنٹرول ہے۔'
   },
   bye: { roman: 'Theek hai sir, app band kar raha hoon.', urdu: 'ٹھیک ہے سر، ایپ بند کر رہا ہوں۔' },
   keyMissing: {
@@ -264,6 +264,888 @@ let voicesRetry = null;
 let toastTimer = null;
 let reqSeq = 0;
 const pendingRequests = {};
+
+/* ============================================================ SMART HOME */
+/* The virtual home works with no setup. Optional Home Assistant mirroring uses
+   the native HTTP bridge, so the phone never needs a second API key. */
+const SH_LS = { state: 'jv.smarthome', config: 'jv.smarthome.config' };
+
+const SH_DEFAULT_STATE = {
+  lights: {
+    drawing_room: { on: false, brightness: 100 },
+    bedroom: { on: false, brightness: 100 },
+    kitchen: { on: false, brightness: 100 },
+    bathroom: { on: false, brightness: 100 },
+    study: { on: false, brightness: 100 },
+    garden: { on: false, brightness: 100 }
+  },
+  fans: {
+    bedroom: { on: false, speed: 2 },
+    drawing_room: { on: false, speed: 2 }
+  },
+  ac: {
+    drawing_room: { on: false, temperature: 24 },
+    bedroom: { on: false, temperature: 24 }
+  },
+  tv: {
+    drawing_room: { on: false, channel: 1, volume: 20 }
+  },
+  doors: {
+    main: { locked: true },
+    back: { locked: true }
+  },
+  blinds: {
+    drawing_room: { state: 'closed' },
+    bedroom: { state: 'closed' },
+    kitchen: { state: 'closed' }
+  },
+  coffee: {
+    kitchen: { on: false }
+  },
+  plugs: {
+    charger: { on: false },
+    iron: { on: false }
+  }
+};
+
+const SH_TYPE_ORDER = ['lights', 'fans', 'ac', 'tv', 'doors', 'blinds', 'coffee', 'plugs'];
+const SH_TYPE_WORDS = {
+  lights: ['light', 'lights', 'lamp', 'lamps', 'batti', 'bati', 'roshni', 'chiragh', 'bulb', 'bulbs'],
+  fans: ['fan', 'fans', 'pankha', 'pankhe', 'pankhaa'],
+  ac: ['ac', 'acs', 'air conditioner', 'air conditioners', 'aircon', 'air conditioning', 'cooler'],
+  tv: ['tv', 'television', 'telly', 'screen'],
+  doors: ['door', 'doors', 'darwaza', 'darwaze', 'gate', 'gates'],
+  blinds: ['blind', 'blinds', 'curtain', 'curtains', 'parda', 'parde', 'shutter', 'shutters'],
+  coffee: ['coffee', 'coffee machine', 'coffee maker', 'espresso', 'cappuccino'],
+  plugs: ['plug', 'plugs', 'socket', 'sockets', 'charger', 'iron', 'press']
+};
+
+const SH_ROOM_LABELS = {
+  drawing_room: 'drawing room',
+  bedroom: 'bedroom',
+  kitchen: 'kitchen',
+  bathroom: 'bathroom',
+  study: 'study',
+  garden: 'garden',
+  main: 'main',
+  back: 'back',
+  charger: 'charger',
+  iron: 'iron'
+};
+
+const SH_ROOM_ALIASES = {
+  drawing_room: ['drawing room', 'living room', 'lounge', 'hall', 'drawing', 'baitha kamra', 'bara kamra', 'drawn room'],
+  bedroom: ['bedroom', 'bed room', 'bed rooms', 'room', 'kamra', 'kamre', 'sleeping room'],
+  kitchen: ['kitchen', 'rasoi', 'kitchen room', 'cook room'],
+  bathroom: ['bathroom', 'bath room', 'washroom', 'ghusal khana', 'toilet'],
+  study: ['study', 'study room', 'office', 'library'],
+  garden: ['garden', 'lawn', 'yard', 'bagh', 'bahar'],
+  main: ['main door', 'front door', 'main gate', 'front gate', 'darwaza', 'gate', 'front'],
+  back: ['back door', 'back gate', 'pichla darwaza', 'back'],
+  charger: ['charger', 'phone charger', 'mobile charger'],
+  iron: ['iron', 'press', 'iron plug']
+};
+
+const SH_ALL_WORDS = ['all', 'sab', 'sare', 'saari', 'sabhi', 'sab kuch', 'poore ghar', 'pura ghar'];
+
+const SH_SCENES = {
+  morning: [
+    ['lights', 'bedroom', { on: true, brightness: 40 }],
+    ['lights', 'kitchen', { on: true, brightness: 80 }],
+    ['lights', 'drawing_room', { on: false }],
+    ['lights', 'bathroom', { on: true, brightness: 60 }],
+    ['blinds', 'bedroom', { state: 'open' }],
+    ['blinds', 'kitchen', { state: 'open' }],
+    ['coffee', 'kitchen', { on: true }],
+    ['tv', 'drawing_room', { on: false }]
+  ],
+  movie: [
+    ['lights', 'drawing_room', { on: true, brightness: 20 }],
+    ['lights', 'bedroom', { on: false }],
+    ['lights', 'kitchen', { on: false }],
+    ['lights', 'bathroom', { on: false }],
+    ['lights', 'study', { on: false }],
+    ['lights', 'garden', { on: false }],
+    ['tv', 'drawing_room', { on: true, volume: 35 }],
+    ['blinds', 'drawing_room', { state: 'closed' }],
+    ['ac', 'drawing_room', { on: true, temperature: 24 }],
+    ['doors', 'main', { locked: true }],
+    ['doors', 'back', { locked: true }],
+    ['coffee', 'kitchen', { on: false }]
+  ],
+  sleep: [
+    ['lights', 'drawing_room', { on: false }],
+    ['lights', 'bedroom', { on: false }],
+    ['lights', 'kitchen', { on: false }],
+    ['lights', 'bathroom', { on: false }],
+    ['lights', 'study', { on: false }],
+    ['lights', 'garden', { on: false }],
+    ['tv', 'drawing_room', { on: false }],
+    ['fans', 'bedroom', { on: true, speed: 2 }],
+    ['ac', 'bedroom', { on: true, temperature: 25 }],
+    ['ac', 'drawing_room', { on: false }],
+    ['blinds', 'drawing_room', { state: 'closed' }],
+    ['blinds', 'bedroom', { state: 'closed' }],
+    ['blinds', 'kitchen', { state: 'closed' }],
+    ['doors', 'main', { locked: true }],
+    ['doors', 'back', { locked: true }],
+    ['coffee', 'kitchen', { on: false }],
+    ['plugs', 'iron', { on: false }]
+  ],
+  guest: [
+    ['lights', 'drawing_room', { on: true, brightness: 80 }],
+    ['lights', 'kitchen', { on: true, brightness: 90 }],
+    ['ac', 'drawing_room', { on: true, temperature: 22 }],
+    ['blinds', 'drawing_room', { state: 'open' }],
+    ['blinds', 'bedroom', { state: 'open' }],
+    ['blinds', 'kitchen', { state: 'open' }],
+    ['doors', 'main', { locked: false }],
+    ['tv', 'drawing_room', { on: true, volume: 25 }],
+    ['coffee', 'kitchen', { on: true }]
+  ],
+  work: [
+    ['lights', 'study', { on: true, brightness: 90 }],
+    ['lights', 'drawing_room', { on: false }],
+    ['lights', 'bedroom', { on: false }],
+    ['tv', 'drawing_room', { on: false }],
+    ['ac', 'drawing_room', { on: true, temperature: 24 }],
+    ['coffee', 'kitchen', { on: true }],
+    ['doors', 'main', { locked: true }]
+  ],
+  away: [
+    ['lights', 'drawing_room', { on: false }],
+    ['lights', 'bedroom', { on: false }],
+    ['lights', 'kitchen', { on: false }],
+    ['lights', 'bathroom', { on: false }],
+    ['lights', 'study', { on: false }],
+    ['lights', 'garden', { on: false }],
+    ['fans', 'bedroom', { on: false }],
+    ['fans', 'drawing_room', { on: false }],
+    ['ac', 'drawing_room', { on: false }],
+    ['ac', 'bedroom', { on: false }],
+    ['tv', 'drawing_room', { on: false }],
+    ['coffee', 'kitchen', { on: false }],
+    ['plugs', 'charger', { on: false }],
+    ['plugs', 'iron', { on: false }],
+    ['blinds', 'drawing_room', { state: 'closed' }],
+    ['blinds', 'bedroom', { state: 'closed' }],
+    ['blinds', 'kitchen', { state: 'closed' }],
+    ['doors', 'main', { locked: true }],
+    ['doors', 'back', { locked: true }]
+  ],
+  party: [
+    ['lights', 'drawing_room', { on: true, brightness: 100 }],
+    ['lights', 'kitchen', { on: true, brightness: 100 }],
+    ['lights', 'garden', { on: true, brightness: 100 }],
+    ['tv', 'drawing_room', { on: true, volume: 55 }],
+    ['blinds', 'drawing_room', { state: 'open' }],
+    ['ac', 'drawing_room', { on: true, temperature: 22 }],
+    ['doors', 'main', { locked: true }],
+    ['coffee', 'kitchen', { on: false }]
+  ]
+};
+
+const SH_SCENE_ALIASES = {
+  morning: ['morning', 'good morning', 'subah', 'seher'],
+  movie: ['movie', 'film', 'cinema', 'movie mode', 'picture'],
+  sleep: ['sleep', 'sleep mode', 'night', 'good night', 'raat', 'sona', 'so jao'],
+  guest: ['guest', 'guest mode', 'mehman', 'mehmaan', 'guests'],
+  work: ['work', 'work mode', 'office', 'kaam', 'study mode'],
+  away: ['away', 'away mode', 'bahar', 'leave', 'lock down', 'lockdown', 'bahar ja raha'],
+  party: ['party', 'party mode', 'mehfil', 'dawat', 'celebration']
+};
+
+const SH_HA_DOMAIN = {
+  lights: 'light', fans: 'fan', ac: 'climate', tv: 'media_player',
+  doors: 'lock', blinds: 'cover', coffee: 'switch', plugs: 'switch'
+};
+
+function shEscape(text) {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function shHasWord(text, word) {
+  try { return new RegExp('\\b' + shEscape(word) + '\\b').test(text); }
+  catch (e) { return String(text).indexOf(word) !== -1; }
+}
+
+function shNorm(text) {
+  return String(text == null ? '' : text).toLowerCase()
+    .replace(/[-_]/g, ' ')
+    .replace(/[^a-z0-9% ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function shInt(value, fallback) {
+  if (value === null || value === undefined || value === '') return fallback;
+  const m = String(value).match(/-?\d+/);
+  if (!m) return fallback;
+  const n = parseInt(m[0], 10);
+  return isNaN(n) ? fallback : n;
+}
+
+function shClamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+function shDeepMerge(base, data) {
+  const out = {};
+  const src = data && typeof data === 'object' ? data : {};
+  Object.keys(base).forEach(key => {
+    const value = base[key];
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      const child = src[key] && typeof src[key] === 'object' ? src[key] : {};
+      out[key] = shDeepMerge(value, child);
+    } else {
+      out[key] = Object.prototype.hasOwnProperty.call(src, key) ? src[key] : value;
+    }
+  });
+  Object.keys(src).forEach(key => { if (!(key in out)) out[key] = src[key]; });
+  return out;
+}
+
+function shLoadState() {
+  const data = loadJSON(SH_LS.state, {});
+  return shDeepMerge(SH_DEFAULT_STATE, data);
+}
+
+function shSaveState(state) {
+  saveJSON(SH_LS.state, state);
+}
+
+function shLoadConfig() {
+  const data = loadJSON(SH_LS.config, {});
+  const cfg = Object.assign({ enabled: false, url: '', token: '', entities: {} }, data || {});
+  if (!cfg.entities || typeof cfg.entities !== 'object') cfg.entities = {};
+  return cfg;
+}
+
+function shSaveConfig(cfg) {
+  saveJSON(SH_LS.config, cfg);
+}
+
+function shAvailable(state, dtype) {
+  const devices = state[dtype] || {};
+  return Object.keys(devices).filter(id => devices[id] && typeof devices[id] === 'object');
+}
+
+function shSingular(dtype) {
+  return {
+    lights: 'light', fans: 'fan', ac: 'AC', tv: 'TV', doors: 'door',
+    blinds: 'blinds', coffee: 'coffee machine', plugs: 'plug'
+  }[dtype] || dtype;
+}
+
+function shLabel(dtype, id) {
+  const room = SH_ROOM_LABELS[id] || String(id).replace(/_/g, ' ');
+  if (dtype === 'tv') return 'TV';
+  if (dtype === 'coffee') return 'coffee machine';
+  if (dtype === 'doors') return room + ' door';
+  if (dtype === 'plugs') return room + ' plug';
+  if (dtype === 'blinds') return room + ' blinds';
+  return room + ' ' + shSingular(dtype);
+}
+
+function shDeviceMenu() {
+  return 'Devices: drawing room, bedroom, kitchen, bathroom, study and garden lights; ' +
+    'bedroom and drawing room fans and ACs; TV; main and back doors; ' +
+    'drawing room, bedroom and kitchen blinds; coffee machine; charger and iron plugs.';
+}
+
+function shStatusLine(dtype, id, data) {
+  const label = shLabel(dtype, id);
+  if (dtype === 'lights') {
+    return data.on ? label + ' on ' + shInt(data.brightness, 100) + '%' : label + ' off';
+  }
+  if (dtype === 'fans') {
+    return data.on ? label + ' on speed ' + shInt(data.speed, 2) : label + ' off';
+  }
+  if (dtype === 'ac') {
+    return data.on ? label + ' on ' + shInt(data.temperature, 24) + 'C' : label + ' off';
+  }
+  if (dtype === 'tv') {
+    return data.on
+      ? 'TV on, channel ' + shInt(data.channel, 1) + ', volume ' + shInt(data.volume, 20) + '%'
+      : 'TV off';
+  }
+  if (dtype === 'doors') return label + (data.locked ? ' locked' : ' unlocked');
+  if (dtype === 'blinds') return label + ' ' + (data.state || 'closed');
+  return label + (data.on ? ' on' : ' off');
+}
+
+function shTypesIn(text) {
+  const found = [];
+  SH_TYPE_ORDER.forEach(dtype => {
+    if (SH_TYPE_WORDS[dtype].some(word => shHasWord(text, word))) found.push(dtype);
+  });
+  return found;
+}
+
+function shRoomsIn(text) {
+  const pairs = [];
+  Object.keys(SH_ROOM_ALIASES).forEach(id => {
+    SH_ROOM_ALIASES[id].forEach(alias => pairs.push([alias.length, id, alias]));
+  });
+  pairs.sort((a, b) => b[0] - a[0]);
+  const found = [];
+  const used = {};
+  let remaining = ' ' + text + ' ';
+  pairs.forEach(pair => {
+    const id = pair[1];
+    const alias = pair[2];
+    if (used[id]) return;
+    if (shHasWord(remaining, alias)) {
+      found.push(id);
+      used[id] = true;
+      remaining = remaining.replace(new RegExp('\\b' + shEscape(alias) + '\\b', 'g'), ' ');
+    }
+  });
+  return found;
+}
+
+function shAllRequested(text) {
+  return SH_ALL_WORDS.some(word => shHasWord(text, word));
+}
+
+function shResolveTargets(text, action) {
+  const state = shLoadState();
+  let types = shTypesIn(text);
+  let rooms = shRoomsIn(text).filter(id => SH_ROOM_LABELS[id]);
+  const wantAll = shAllRequested(text) || ['', 'ghar', 'home', 'house'].indexOf(String(text).trim()) !== -1;
+
+  if (!types.length && wantAll) {
+    if (action === 'lock' || action === 'unlock') types = ['doors'];
+    else if (action === 'open' || action === 'close') types = ['blinds'];
+    else if (action === 'brightness' || action === 'dim') types = ['lights'];
+    else if (action === 'temperature' || action === 'temp') types = ['ac'];
+    else if (action === 'volume') types = ['tv'];
+    else if (action === 'speed') types = ['fans'];
+    else types = ['lights', 'fans', 'ac', 'tv', 'coffee', 'plugs'];
+    rooms = [];
+  }
+
+  if (!types.length) {
+    if (rooms.length) {
+      const room = rooms[0];
+      const options = SH_TYPE_ORDER.filter(t => state[t] && state[t][room]);
+      return 'Which device in the ' + (SH_ROOM_LABELS[room] || room) + '? ' +
+        options.map(shSingular).join(', ') + '.';
+    }
+    return 'I could not find that device. ' + shDeviceMenu();
+  }
+
+  const targets = [];
+  for (const dtype of types) {
+    const ids = shAvailable(state, dtype);
+    let chosen = [];
+    if (dtype === 'tv') chosen = ['drawing_room'];
+    else if (dtype === 'coffee') chosen = ['kitchen'];
+    else if (dtype === 'doors' || dtype === 'plugs') {
+      chosen = rooms.filter(id => ids.indexOf(id) !== -1);
+      if (!chosen.length) chosen = (wantAll || !rooms.length) ? ids.slice() : [];
+    } else {
+      chosen = rooms.filter(id => ids.indexOf(id) !== -1);
+    }
+    if (wantAll || (!rooms.length && (dtype === 'tv' || dtype === 'coffee'))) {
+      chosen = ids.slice();
+    } else if (!chosen.length && !rooms.length) {
+      if (ids.length === 1) chosen = ids.slice();
+      else return 'Which ' + shSingular(dtype) + '? ' +
+        ids.map(id => SH_ROOM_LABELS[id] || id).join(', ') + '.';
+    }
+    chosen.forEach(id => targets.push([dtype, id, shLabel(dtype, id)]));
+  }
+
+  const seen = {};
+  const unique = [];
+  targets.forEach(item => {
+    const key = item[0] + '.' + item[1];
+    if (!seen[key]) { seen[key] = true; unique.push(item); }
+  });
+  return unique;
+}
+
+const SH_ACTION_ALIASES = {
+  'turn on': 'on', 'switch on': 'on', start: 'on', chalu: 'on', chalao: 'on',
+  'turn off': 'off', 'switch off': 'off', stop: 'off', band: 'off', bandh: 'off',
+  flip: 'toggle', switch: 'toggle',
+  dim: 'brightness', bright: 'brightness', percent: 'brightness', percentage: 'brightness',
+  temp: 'temperature',
+  lock: 'lock', unlock: 'unlock', open: 'open', close: 'close',
+  speed: 'speed', channel: 'channel', volume: 'volume',
+  refresh: 'sync', update: 'sync'
+};
+
+function shNormAction(action) {
+  let act = shNorm(action);
+  if (SH_ACTION_ALIASES[act]) act = SH_ACTION_ALIASES[act];
+  if (['state', 'report', 'list', 'info', ''].indexOf(act) !== -1) return 'status';
+  return act;
+}
+
+function shSetFields(dtype, id, data, action, value) {
+  const num = shInt(value, null);
+  if (dtype === 'lights') {
+    if (action === 'on') data.on = true;
+    else if (action === 'off') data.on = false;
+    else if (action === 'toggle') data.on = !data.on;
+    else if (action === 'brightness' || action === 'set') {
+      data.brightness = shClamp(num === null ? 100 : num, 0, 100);
+      data.on = data.brightness > 0;
+    } else if (action === 'status') return [true, shStatusLine(dtype, id, data)];
+    else return [false, 'The light supports on, off, toggle and brightness.'];
+  } else if (dtype === 'fans') {
+    if (action === 'on') data.on = true;
+    else if (action === 'off') data.on = false;
+    else if (action === 'toggle') data.on = !data.on;
+    else if (action === 'speed' || action === 'set') {
+      data.speed = shClamp(num === null ? 2 : num, 1, 5);
+      data.on = true;
+    } else return [false, 'The fan supports on, off, toggle and speed.'];
+  } else if (dtype === 'ac') {
+    if (action === 'on') data.on = true;
+    else if (action === 'off') data.on = false;
+    else if (action === 'toggle') data.on = !data.on;
+    else if (action === 'temperature' || action === 'set') {
+      data.temperature = shClamp(num === null ? 24 : num, 16, 30);
+      data.on = true;
+    } else return [false, 'The AC supports on, off, toggle and temperature.'];
+  } else if (dtype === 'tv') {
+    if (action === 'on') data.on = true;
+    else if (action === 'off') data.on = false;
+    else if (action === 'toggle') data.on = !data.on;
+    else if (action === 'volume') {
+      data.volume = shClamp(num === null ? 20 : num, 0, 100);
+      data.on = true;
+    } else if (action === 'channel') {
+      data.channel = Math.max(1, num === null ? 1 : num);
+      data.on = true;
+    } else if (action === 'set') {
+      if (String(value || '').indexOf('%') !== -1) data.volume = shClamp(num === null ? 20 : num, 0, 100);
+      else data.channel = Math.max(1, num === null ? 1 : num);
+      data.on = true;
+    } else return [false, 'The TV supports on, off, toggle, channel and volume.'];
+  } else if (dtype === 'doors') {
+    if (action === 'lock') data.locked = true;
+    else if (action === 'unlock') data.locked = false;
+    else if (action === 'toggle') data.locked = !data.locked;
+    else return [false, 'The door supports lock and unlock.'];
+  } else if (dtype === 'blinds') {
+    if (action === 'open' || action === 'on') data.state = 'open';
+    else if (action === 'close' || action === 'off') data.state = 'closed';
+    else if (action === 'toggle') data.state = data.state === 'open' ? 'closed' : 'open';
+    else return [false, 'The blinds support open and close.'];
+  } else if (dtype === 'coffee' || dtype === 'plugs') {
+    if (action === 'on') data.on = true;
+    else if (action === 'off') data.on = false;
+    else if (action === 'toggle') data.on = !data.on;
+    else return [false, 'The ' + shSingular(dtype) + ' supports on, off and toggle.'];
+  } else return [false, 'Unknown device type.'];
+  return [true, shStatusLine(dtype, id, data)];
+}
+
+function shCap(text) {
+  const s = String(text == null ? '' : text);
+  return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
+}
+
+function shSummarizeChanges(changes) {
+  const counts = {};
+  changes.forEach(item => { counts[item[0]] = (counts[item[0]] || 0) + 1; });
+  return Object.keys(counts).map(name => counts[name] + ' ' + name.replace(/_/g, ' ')).join(', ');
+}
+
+function shHomeStatus() {
+  const state = shLoadState();
+  const lines = ['Smart home status:'];
+  SH_TYPE_ORDER.forEach(dtype => {
+    const devices = state[dtype] || {};
+    const items = Object.keys(devices)
+      .filter(id => devices[id] && typeof devices[id] === 'object')
+      .map(id => shStatusLine(dtype, id, devices[id]));
+    if (items.length) lines.push('- ' + dtype.replace(/_/g, ' ') + ': ' + items.join(', ') + '.');
+  });
+  const cfg = shLoadConfig();
+  if (cfg.enabled && cfg.url) {
+    lines.push('- Home Assistant: connected at ' + cfg.url + " (say 'sync home' to refresh).");
+  } else {
+    lines.push('- Home Assistant: not configured (virtual devices only).');
+  }
+  return lines.join('\n');
+}
+
+function shHaEntity(dtype, id) {
+  const cfg = shLoadConfig();
+  const override = (cfg.entities || {})[dtype + '.' + id];
+  if (override) return String(override);
+  return (SH_HA_DOMAIN[dtype] || 'switch') + '.' + id;
+}
+
+function shHaService(dtype, id, data) {
+  const entity = shHaEntity(dtype, id);
+  if (dtype === 'lights') {
+    return data.on
+      ? ['light', 'turn_on', { entity_id: entity, brightness_pct: shInt(data.brightness, 100) }]
+      : ['light', 'turn_off', { entity_id: entity }];
+  }
+  if (dtype === 'fans') {
+    return data.on
+      ? ['fan', 'turn_on', { entity_id: entity, percentage: shInt(data.speed, 2) * 20 }]
+      : ['fan', 'turn_off', { entity_id: entity }];
+  }
+  if (dtype === 'ac') {
+    return data.on
+      ? ['climate', 'set_temperature', { entity_id: entity, temperature: shInt(data.temperature, 24) }]
+      : ['climate', 'turn_off', { entity_id: entity }];
+  }
+  if (dtype === 'tv') {
+    return data.on
+      ? ['media_player', 'volume_set', { entity_id: entity, volume_level: shInt(data.volume, 20) / 100 }]
+      : ['media_player', 'turn_off', { entity_id: entity }];
+  }
+  if (dtype === 'doors') {
+    return ['lock', data.locked ? 'lock' : 'unlock', { entity_id: entity }];
+  }
+  if (dtype === 'blinds') {
+    return ['cover', data.state === 'open' ? 'open_cover' : 'close_cover', { entity_id: entity }];
+  }
+  return ['switch', data.on ? 'turn_on' : 'turn_off', { entity_id: entity }];
+}
+
+async function shHaRequest(method, path, payload) {
+  const cfg = shLoadConfig();
+  if (!cfg.enabled || !cfg.url || !cfg.token) return { ok: false, status: 0, body: 'not configured' };
+  const url = String(cfg.url).replace(/\/+$/, '') + path;
+  const headers = {
+    Authorization: 'Bearer ' + cfg.token,
+    'Content-Type': 'application/json'
+  };
+  const body = payload === null || payload === undefined ? '' : JSON.stringify(payload);
+  const r = await nativeHttpRequest(method, url, headers, body, 5000);
+  return { ok: !!r.ok, status: r.status, body: String(r.body || '') };
+}
+
+async function shHaPushMany(changed, state) {
+  const cfg = shLoadConfig();
+  if (!cfg.enabled) return [];
+  const notes = [];
+  for (const item of changed) {
+    const dtype = item[0];
+    const id = item[1];
+    const spec = shHaService(dtype, id, state[dtype][id]);
+    const r = await shHaRequest('POST', '/api/services/' + spec[0] + '/' + spec[1], spec[2]);
+    if (!r.ok) {
+      notes.push(String(r.body || (r.status ? 'HTTP ' + r.status : 'failed')).slice(0, 90));
+      break;
+    }
+  }
+  return notes;
+}
+
+async function shSyncFromHa() {
+  const cfg = shLoadConfig();
+  if (!cfg.enabled || !cfg.url || !cfg.token) {
+    return 'Home Assistant is not configured. Use smart_home_setup with the URL and a long-lived token.';
+  }
+  const r = await shHaRequest('GET', '/api/states', null);
+  if (!r.ok) return 'Could not read Home Assistant states: ' + String(r.body || r.status || '').slice(0, 120) + '.';
+  let states;
+  try { states = JSON.parse(r.body); } catch (e) { return 'Home Assistant returned an unexpected response.'; }
+  const byEntity = {};
+  if (Array.isArray(states)) {
+    states.forEach(item => {
+      if (item && item.entity_id) byEntity[item.entity_id] = item;
+    });
+  }
+  const state = shLoadState();
+  let updated = 0;
+  SH_TYPE_ORDER.forEach(dtype => {
+    const devices = state[dtype] || {};
+    Object.keys(devices).forEach(id => {
+      const data = devices[id];
+      if (!data || typeof data !== 'object') return;
+      const entity = byEntity[shHaEntity(dtype, id)];
+      if (!entity) return;
+      const raw = String(entity.state || '').toLowerCase();
+      const attrs = entity.attributes || {};
+      try {
+        if (dtype === 'lights') {
+          data.on = raw === 'on';
+          if (attrs.brightness != null) data.brightness = shClamp(Math.round(Number(attrs.brightness) * 100 / 255), 0, 100);
+        } else if (dtype === 'fans') {
+          data.on = raw === 'on';
+          if (attrs.percentage != null) data.speed = shClamp(Math.round(Number(attrs.percentage) / 20), 1, 5);
+        } else if (dtype === 'ac') {
+          data.on = ['off', 'unavailable', 'unknown'].indexOf(raw) === -1;
+          if (attrs.temperature != null) data.temperature = shClamp(Math.round(Number(attrs.temperature)), 16, 30);
+        } else if (dtype === 'tv') {
+          data.on = ['off', 'standby', 'unavailable', 'unknown'].indexOf(raw) === -1;
+          if (attrs.volume_level != null) data.volume = shClamp(Math.round(Number(attrs.volume_level) * 100), 0, 100);
+        } else if (dtype === 'doors') {
+          data.locked = raw === 'locked';
+        } else if (dtype === 'blinds') {
+          data.state = raw === 'open' ? 'open' : 'closed';
+        } else {
+          data.on = raw === 'on';
+        }
+        updated++;
+      } catch (e) { }
+    });
+  });
+  shSaveState(state);
+  return 'Synced ' + updated + ' devices from Home Assistant.';
+}
+
+async function shSmartHome(action, device, value) {
+  const act = shNormAction(action);
+  if (act === 'status') return shHomeStatus();
+  if (act === 'sync') return await shSyncFromHa();
+  if (['on', 'off', 'toggle', 'brightness', 'temperature', 'volume', 'channel', 'speed',
+    'lock', 'unlock', 'open', 'close', 'set'].indexOf(act) === -1) {
+    return 'Unknown action. Use status, on, off, toggle, brightness, temperature, ' +
+      'volume, channel, speed, lock, unlock, open, close or sync.';
+  }
+
+  const text = shNorm(device);
+  let targets = shResolveTargets(text, act);
+  if (typeof targets === 'string') return targets;
+  if (!targets.length) return 'I could not find that device. ' + shDeviceMenu();
+  if (act === 'lock' || act === 'unlock') targets = targets.filter(t => t[0] === 'doors');
+  if (act === 'open' || act === 'close') targets = targets.filter(t => t[0] === 'blinds');
+  if (!targets.length) return 'That action only works on doors or blinds.';
+
+  const state = shLoadState();
+  const changed = [];
+  const messages = [];
+  for (const target of targets) {
+    const dtype = target[0];
+    const id = target[1];
+    const data = state[dtype] && state[dtype][id];
+    if (!data || typeof data !== 'object') continue;
+    const result = shSetFields(dtype, id, data, act, value);
+    if (!result[0]) return result[1];
+    changed.push([dtype, id]);
+    messages.push(result[1]);
+  }
+  shSaveState(state);
+
+  const notes = await shHaPushMany(changed, state);
+  let reply;
+  if (messages.length === 1) reply = shCap(messages[0]) + '.';
+  else if (messages.length <= 4) reply = 'Done: ' + messages.join('; ') + '.';
+  else reply = 'Done: ' + shSummarizeChanges(changed) + ' updated.';
+  if (notes.length) reply += ' Home Assistant reported: ' + notes[0] + '.';
+  return reply;
+}
+
+async function shSmartScene(name) {
+  const text = shNorm(name);
+  let scene = null;
+  Object.keys(SH_SCENE_ALIASES).some(key => {
+    if (text === key || SH_SCENE_ALIASES[key].some(alias => text === alias || shHasWord(text, alias))) {
+      scene = key;
+      return true;
+    }
+    return false;
+  });
+  if (!scene) return 'Unknown scene. Available scenes: morning, movie, sleep, guest, work, away, party.';
+
+  const state = shLoadState();
+  const changed = [];
+  SH_SCENES[scene].forEach(item => {
+    const dtype = item[0];
+    const id = item[1];
+    const fields = item[2];
+    const data = state[dtype] && state[dtype][id];
+    if (!data || typeof data !== 'object') return;
+    Object.assign(data, fields);
+    changed.push([dtype, id]);
+  });
+  shSaveState(state);
+
+  const notes = await shHaPushMany(changed, state);
+  let reply = "Scene '" + scene + "' applied: " + shSummarizeChanges(changed) + ' updated.';
+  if (notes.length) reply += ' Home Assistant reported: ' + notes[0] + '.';
+  return reply;
+}
+
+async function shSmartHomeSetup(url, token, enabled) {
+  const cfg = shLoadConfig();
+  if (enabled === false) {
+    cfg.enabled = false;
+    shSaveConfig(cfg);
+    return 'Home Assistant disabled. The virtual smart home still works.';
+  }
+
+  let newUrl = String(url == null ? '' : url).trim();
+  const newToken = String(token == null ? '' : token).trim();
+  if (newUrl) {
+    if (!/^https?:\/\//i.test(newUrl)) newUrl = 'http://' + newUrl;
+    cfg.url = newUrl.replace(/\/+$/, '');
+  }
+  if (newToken) cfg.token = newToken;
+  if (!cfg.url) return 'Give me the Home Assistant URL first, for example http://192.168.1.10:8123.';
+  if (!cfg.token) return 'I still need a long-lived access token from Home Assistant.';
+  cfg.enabled = true;
+  shSaveConfig(cfg);
+
+  const r = await shHaRequest('GET', '/api/', null);
+  if (!r.ok) {
+    return 'Saved, but the connection failed: ' + String(r.body || r.status || '').slice(0, 120) +
+      ". Check the URL and token, then say 'test home assistant'.";
+  }
+  let location = '';
+  try {
+    const data = JSON.parse(r.body);
+    location = data.location_name || '';
+  } catch (e) { }
+  return 'Home Assistant connected' + (location ? ': ' + location : '') +
+    ". Say 'sync home' to import the device states.";
+}
+
+function shSmartHomeHelp() {
+  return shDeviceMenu() + ' Scenes: morning, movie, sleep, guest, work, away, party. ' +
+    'Home Assistant is optional; say "connect home assistant" with the URL and token.';
+}
+
+function shConfigStatus() {
+  const cfg = shLoadConfig();
+  if (cfg.enabled && cfg.url) return 'Connected: ' + cfg.url + (cfg.token ? ' (token saved)' : '');
+  if (cfg.url) return 'Saved but disabled: ' + cfg.url;
+  return 'Home Assistant not configured — virtual devices only.';
+}
+
+async function shHaTest() {
+  const cfg = shLoadConfig();
+  if (!cfg.url) return 'Home Assistant URL not set.';
+  if (!cfg.token) return 'Home Assistant token not set.';
+  const r = await shHaRequest('GET', '/api/', null);
+  if (r.ok) return 'Home Assistant is reachable.';
+  return 'Home Assistant failed: ' + String(r.body || (r.status ? 'HTTP ' + r.status : 'no response')).slice(0, 110);
+}
+
+/* ============================================================ NEWS + HTTP */
+const pendingHttp = {};
+const NEWS_FEED = 'https://news.google.com/rss';
+const NEWS_PARAMS = 'hl=en-PK&gl=PK&ceid=PK:en';
+const newsCache = {};
+
+window.__jarvisHttpRaw = function (id, code, body) {
+  const p = pendingHttp[id];
+  if (!p) return;
+  delete pendingHttp[id];
+  clearTimeout(p.timer);
+  const status = Number(code) || 0;
+  p.resolve({ ok: status >= 200 && status < 300, status: status, body: String(body == null ? '' : body) });
+};
+
+function nativeHttpRequest(method, url, headers, body, timeoutMs) {
+  return new Promise(resolve => {
+    const id = 'h' + (++reqSeq);
+    const timeout = Math.max(3000, Math.min(15000, Number(timeoutMs) || 8000));
+    const timer = setTimeout(() => {
+      if (pendingHttp[id]) {
+        delete pendingHttp[id];
+        resolve({ ok: false, status: 0, body: 'timeout' });
+      }
+    }, timeout + 500);
+    pendingHttp[id] = { resolve: resolve, timer: timer };
+    try {
+      if (hasNative && Native && typeof Native.httpRequest === 'function') {
+        Native.httpRequest(id, String(method || 'GET').toUpperCase(), String(url),
+          JSON.stringify(headers || {}), String(body == null ? '' : body), timeout);
+        return;
+      }
+      fetch(url, { method: method || 'GET', headers: headers || {}, body: body || undefined })
+        .then(r => r.text().then(text => window.__jarvisHttpRaw(id, r.status, text)))
+        .catch(e => window.__jarvisHttpRaw(id, 0, 'NETWORK: ' + String(e)));
+    } catch (e) {
+      delete pendingHttp[id];
+      clearTimeout(timer);
+      resolve({ ok: false, status: 0, body: 'NETWORK: ' + String(e) });
+    }
+  });
+}
+
+function newsDecodeXml(text) {
+  return String(text)
+    .replace(/&#x([0-9a-f]+);/gi, (m, h) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (m, n) => String.fromCharCode(parseInt(n, 10)))
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
+function newsCleanTitle(title) {
+  let text = String(title || '').replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').replace(/<[^>]+>/g, '');
+  text = newsDecodeXml(text).replace(/\s+/g, ' ').trim();
+  const cut = text.lastIndexOf(' - ');
+  if (cut > 0) text = text.slice(0, cut).trim();
+  return text;
+}
+
+function newsXmlText(block, tag) {
+  const m = String(block).match(new RegExp('<' + tag + '[^>]*>([\\s\\S]*?)<\\/' + tag + '>', 'i'));
+  if (!m) return '';
+  return newsDecodeXml(m[1].replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').replace(/<[^>]+>/g, ''))
+    .replace(/\s+/g, ' ').trim();
+}
+
+function parseNewsRss(xml, limit) {
+  const out = [];
+  if (typeof DOMParser !== 'undefined') {
+    try {
+      const doc = new DOMParser().parseFromString(String(xml), 'text/xml');
+      const items = doc.querySelectorAll('item');
+      for (let i = 0; i < items.length && out.length < limit; i++) {
+        const item = items[i];
+        const titleEl = item.querySelector('title');
+        const sourceEl = item.querySelector('source');
+        const title = newsCleanTitle(titleEl ? titleEl.textContent : '');
+        if (!title) continue;
+        out.push([title, sourceEl ? String(sourceEl.textContent || '').trim() : '']);
+      }
+      if (out.length) return out;
+    } catch (e) { }
+  }
+  const re = /<item\b[^>]*>([\s\S]*?)<\/item>/gi;
+  let m;
+  while ((m = re.exec(String(xml))) && out.length < limit) {
+    const title = newsCleanTitle(newsXmlText(m[1], 'title'));
+    if (!title) continue;
+    out.push([title, newsXmlText(m[1], 'source')]);
+  }
+  return out;
+}
+
+async function newsBrief(topic, count) {
+  const limit = shClamp(shInt(count, 5), 1, 8);
+  topic = String(topic == null ? '' : topic).trim();
+  const key = topic.toLowerCase() + '|' + limit;
+  const now = Date.now();
+  if (newsCache[key] && now - newsCache[key].t < 300000) return newsCache[key].text;
+
+  const url = topic
+    ? NEWS_FEED + '/search?q=' + encodeURIComponent(topic) + '&' + NEWS_PARAMS
+    : NEWS_FEED + '?' + NEWS_PARAMS;
+  const r = await nativeHttpRequest('GET', url, {
+    Accept: 'application/rss+xml, application/xml, text/xml;q=0.9, */*;q=0.8'
+  }, '', 9000);
+  if (!r.ok) {
+    return 'Could not fetch the news right now: ' +
+      String(r.body || (r.status ? 'HTTP ' + r.status : 'no response')).slice(0, 120);
+  }
+  const items = parseNewsRss(r.body, limit);
+  if (!items.length) return 'No news found for ' + (topic || 'top headlines') + ' right now.';
+
+  const lines = [topic ? 'News about "' + topic + '":' : 'Top headlines:'];
+  items.forEach((item, index) => {
+    lines.push((index + 1) + '. ' + item[0] + (item[1] ? ' (' + item[1] + ')' : ''));
+  });
+  lines.push('Source: Google News.');
+  const text = lines.join('\n');
+  newsCache[key] = { t: now, text: text };
+  return text;
+}
 
 /* Background mode: Android service keeps us alive, native code restarts the mic. */
 function bgMode() {
@@ -1034,7 +1916,30 @@ async function localCommand(text) {
     return true;
   }
 
-  if (/(flashlight|torch|light) (on|chalao|jalao)/.test(low)) {
+  const sceneMatch = low.match(/\b(morning|movie|sleep|guest|work|away|party|mehman|mehmaan|dawat|mehfil)\s+(mode|scene)\b/);
+  if (sceneMatch) {
+    const sceneName = sceneMatch[1];
+    await shSmartScene(sceneName);
+    const l = replyFor(lang,
+      sceneName + ' scene applied, sir.',
+      'Ji sir, ' + sceneName + ' scene set kar diya.',
+      'جی سر، ' + sceneName + ' سین سیٹ کر دیا۔');
+    respond(l.roman, l.urdu);
+    return true;
+  }
+  if (/^(ghar|home|house)\s*(ka\s*)?(status|haal|state)$|^smart home status$|^home status$/.test(low)) {
+    const status = shHomeStatus();
+    respond(status, status);
+    return true;
+  }
+  if (/^(news|khabar|khabrein|headlines)(\s+(sunao|batao|dikhao|bolo|suno|brief))?$/.test(low) ||
+      /^(aaj ki|latest|today'?s)\s+(news|khabar|khabrein|headlines)$/.test(low)) {
+    const news = await newsBrief('', 5);
+    respond(news, news);
+    return true;
+  }
+
+  if (/(flashlight|torch) (on|chalao|jalao)/.test(low)) {
     const r = callTool('torch', { on: true });
     toolLog('torch', r);
     if (r.ok) {
@@ -1046,7 +1951,7 @@ async function localCommand(text) {
     }
     return true;
   }
-  if (/(flashlight|torch|light) (off|band|bujhao)/.test(low)) {
+  if (/(flashlight|torch) (off|band|bujhao)/.test(low)) {
     const r = callTool('torch', { on: false });
     toolLog('torch', r);
     if (r.ok) {
@@ -1309,6 +2214,63 @@ function toolDeclarations() {
       }
     },
     {
+      name: 'smart_home',
+      description: 'Control the smart home: lights, fans, AC, TV, doors, blinds, coffee machine and plugs. The built-in virtual home needs no setup. Use "all"/"sab" for every device of a type.',
+      parameters: {
+        type: 'OBJECT',
+        properties: {
+          action: {
+            type: 'STRING',
+            description: 'status, on, off, toggle, brightness, temperature, volume, channel, speed, lock, unlock, open, close or sync'
+          },
+          device: {
+            type: 'STRING',
+            description: 'Room and/or type, e.g. "drawing room light", "bedroom ac", "tv", "main door", "kitchen blinds", "coffee machine", "iron plug", "all lights"'
+          },
+          value: { type: 'STRING', description: 'Number/text for brightness, temperature, volume, channel or speed' }
+        }
+      }
+    },
+    {
+      name: 'smart_scene',
+      description: 'Apply a whole-home scene: morning, movie, sleep, guest, work, away or party.',
+      parameters: {
+        type: 'OBJECT',
+        properties: {
+          name: { type: 'STRING', description: 'Scene name, e.g. movie, good night, mehman, bahar ja raha hoon' }
+        },
+        required: ['name']
+      }
+    },
+    {
+      name: 'smart_home_setup',
+      description: 'Connect or disconnect an optional Home Assistant instance with its URL and a long-lived access token. The virtual home works without this.',
+      parameters: {
+        type: 'OBJECT',
+        properties: {
+          url: { type: 'STRING', description: 'Home Assistant URL, e.g. http://192.168.1.10:8123' },
+          token: { type: 'STRING', description: 'Long-lived access token; leave empty to keep the saved one' },
+          enabled: { type: 'BOOLEAN', description: 'false disables Home Assistant and keeps the virtual home' }
+        }
+      }
+    },
+    {
+      name: 'smart_home_help',
+      description: 'Explain the smart-home devices, commands and scenes.',
+      parameters: { type: 'OBJECT', properties: {} }
+    },
+    {
+      name: 'news_brief',
+      description: 'Read the latest news headlines from Google News. No API key is needed. Never invent headlines; use exactly what this tool returns.',
+      parameters: {
+        type: 'OBJECT',
+        properties: {
+          topic: { type: 'STRING', description: 'Optional subject, e.g. Pakistan, technology, cricket. Empty for top headlines.' },
+          count: { type: 'INTEGER', description: 'How many headlines, 1-8, default 5' }
+        }
+      }
+    },
+    {
       name: 'remember',
       description: 'Save a lasting fact about the user (name, preferences, important things).',
       parameters: {
@@ -1349,6 +2311,8 @@ function buildSystemPrompt() {
     'ACT, DO NOT LECTURE: use tools immediately and chain them until the WHOLE request is done. Never tell the user to do the remaining steps themselves. If a tool fails, try another way, then report the real reason in one short sentence.',
     'HONESTY: say a task is done only when a tool returned ok:true. If needs_user_action:true, say what to tap. Never invent emails, messages, alarms, installs or subscriptions. YouTube subscribe and Gmail mark-as-read cannot be automated.',
     'PHONE POWERS: open apps; Play Store search and REAL install (install_app taps Install and Open when Phone automation is on); read screen (ui_dump); tap (ui_click); type (ui_type); Back/Home/Recents/Notifications (system_action); YouTube search; WhatsApp/SMS/email drafts; alarms; timers; maps; volume; torch; battery/network; clipboard; memory.',
+    'SMART HOME: smart_home controls lights, fans, AC, TV, doors, blinds, coffee and plugs. A virtual home works with no setup; Home Assistant is optional. For "light on karo", "AC 22 degree", "TV band", "darwaza lock", "parda kholo" call smart_home. smart_scene applies morning/movie/sleep/guest/work/away/party for "movie mode" or "good night". Use smart_home_help if unsure.',
+    'NEWS: news_brief reads live Google News headlines with no API key. Use it for "news sunao" or "latest news about cricket". Read only what it returned; never invent headlines.',
     'INSTALL: for "X install karo" call install_app ONCE with the exact app name, not open_play_store too. Wait for the result and report exactly what happened.',
     'AUTOMATION: ' + (automation
       ? 'ON — you can tap through other apps. Use ui_dump before tapping.'
@@ -1423,6 +2387,21 @@ function geminiRequest(model, payload) {
 }
 
 async function runTool(name, args) {
+  if (name === 'smart_home') {
+    return { ok: true, message: await shSmartHome(args && args.action, args && args.device, args && args.value) };
+  }
+  if (name === 'smart_scene') {
+    return { ok: true, message: await shSmartScene(args && args.name) };
+  }
+  if (name === 'smart_home_setup') {
+    return { ok: true, message: await shSmartHomeSetup(args && args.url, args && args.token, !(args && args.enabled === false)) };
+  }
+  if (name === 'smart_home_help') {
+    return { ok: true, message: shSmartHomeHelp() };
+  }
+  if (name === 'news_brief') {
+    return { ok: true, message: await newsBrief(args && args.topic, args && args.count) };
+  }
   if (name === 'remember') {
     const fact = String((args && args.fact) || '').trim();
     if (!fact) return { ok: false, message: 'Kya yaad rakhna hai?' };
@@ -1681,6 +2660,19 @@ function renderSettings() {
       ? 'ON — Jarvis khud buttons dabata hai, Play Store install bhi.'
       : 'Off hai — Play Store install aur screen taps ke liye on karein.';
     if (autoBtn) autoBtn.textContent = on ? 'Settings' : 'Enable';
+  }
+
+  const shState = $('#shState');
+  if (shState) shState.textContent = shConfigStatus();
+  const haUrl = $('#haUrl');
+  if (haUrl && !haUrl.value) {
+    try { haUrl.value = shLoadConfig().url || ''; } catch (e) { }
+  }
+  const haToken = $('#haToken');
+  if (haToken) {
+    let saved = false;
+    try { saved = !!shLoadConfig().token; } catch (e) { }
+    haToken.placeholder = saved ? 'Token saved — leave blank to keep' : 'Long-lived access token (optional)';
   }
 
   const memCount = $('#memoryCount');
@@ -2255,6 +3247,45 @@ function bindEvents() {
   if (autoBtn) autoBtn.addEventListener('click', () => {
     try { Native.openAutomationSettings(); } catch (e) { }
     toast('Accessibility mein "Jarvis Automation" on karein.');
+  });
+
+  const haSave = $('#haSave');
+  if (haSave) haSave.addEventListener('click', async () => {
+    const urlInput = $('#haUrl');
+    const tokenInput = $('#haToken');
+    const url = urlInput ? urlInput.value.trim() : '';
+    const token = tokenInput ? tokenInput.value.trim() : '';
+    if (!url) { toast('Home Assistant URL daalein.'); return; }
+    haSave.disabled = true;
+    try {
+      const result = await shSmartHomeSetup(url, token, true);
+      if (result.indexOf('connected') !== -1) {
+        if (tokenInput) tokenInput.value = '';
+        toast('Home Assistant connected.');
+      } else {
+        toast(result);
+      }
+      renderSettings();
+    } catch (e) {
+      toast('Home Assistant error: ' + String(e));
+    } finally {
+      haSave.disabled = false;
+    }
+  });
+  const haTest = $('#haTest');
+  if (haTest) haTest.addEventListener('click', async () => {
+    haTest.disabled = true;
+    try { toast(await shHaTest()); }
+    catch (e) { toast('Test failed: ' + String(e)); }
+    finally { haTest.disabled = false; }
+  });
+  const haDisable = $('#haDisable');
+  if (haDisable) haDisable.addEventListener('click', async () => {
+    try {
+      const result = await shSmartHomeSetup('', '', false);
+      toast(result);
+      renderSettings();
+    } catch (e) { toast('Disable failed: ' + String(e)); }
   });
 
   $('#handsFreeToggle').addEventListener('change', e => {

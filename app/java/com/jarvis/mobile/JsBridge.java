@@ -697,6 +697,98 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
         }, "jarvis-gemini").start();
     }
 
+    @JavascriptInterface
+    public void httpRequest(final String requestId, final String method, final String urlText,
+                            final String headersJson, final String body, final int timeoutMs) {
+        final String id = requestId == null ? "" : requestId;
+        final String verb = method == null ? "GET" : method.trim().toUpperCase(Locale.US);
+        if (!verb.equals("GET") && !verb.equals("POST")) {
+            callJs("window.__jarvisHttpRaw(" + q(id) + ",0," + q("Only GET and POST are allowed") + ")");
+            return;
+        }
+        URL target;
+        try {
+            target = new URL(urlText == null ? "" : urlText);
+        } catch (Exception e) {
+            callJs("window.__jarvisHttpRaw(" + q(id) + ",0," + q("Invalid URL") + ")");
+            return;
+        }
+        String scheme = target.getProtocol() == null ? "" : target.getProtocol().toLowerCase(Locale.US);
+        if (!scheme.equals("http") && !scheme.equals("https")) {
+            callJs("window.__jarvisHttpRaw(" + q(id) + ",0," + q("Only http and https are allowed") + ")");
+            return;
+        }
+        // Cleartext is only for a Home Assistant box on the local network.
+        if (scheme.equals("http") && !isPrivateHttpHost(target.getHost())) {
+            callJs("window.__jarvisHttpRaw(" + q(id) + ",0," +
+                    q("Plain http is only allowed for local addresses") + ")");
+            return;
+        }
+        final int readTimeout = Math.max(3000, Math.min(15000, timeoutMs));
+        final URL url = target;
+        new Thread(() -> {
+            HttpURLConnection conn = null;
+            try {
+                conn = (HttpURLConnection) url.openConnection();
+                conn.setRequestMethod(verb);
+                conn.setConnectTimeout(6000);
+                conn.setReadTimeout(readTimeout);
+                conn.setInstanceFollowRedirects(true);
+                conn.setRequestProperty("User-Agent",
+                        "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Mobile Safari/537.36");
+                try {
+                    JSONObject headers = new JSONObject(
+                            headersJson == null || headersJson.trim().isEmpty() ? "{}" : headersJson);
+                    java.util.Iterator<String> keys = headers.keys();
+                    while (keys.hasNext()) {
+                        String name = keys.next();
+                        String lower = name.toLowerCase(Locale.US);
+                        if (lower.equals("host") || lower.equals("connection") ||
+                                lower.equals("content-length") || lower.equals("transfer-encoding") ||
+                                lower.equals("upgrade") || lower.equals("keep-alive")) {
+                            continue;
+                        }
+                        String value = headers.optString(name, "");
+                        if (!value.isEmpty()) conn.setRequestProperty(name, value);
+                    }
+                } catch (Exception ignored) { }
+
+                if (verb.equals("POST")) {
+                    byte[] data = (body == null ? "" : body).getBytes(StandardCharsets.UTF_8);
+                    conn.setDoOutput(true);
+                    conn.setFixedLengthStreamingMode(data.length);
+                    if (data.length > 0) {
+                        try (OutputStream os = conn.getOutputStream()) {
+                            os.write(data);
+                        }
+                    }
+                }
+                int code = conn.getResponseCode();
+                InputStream stream = code >= 400 ? conn.getErrorStream() : conn.getInputStream();
+                String text = readAll(stream);
+                callJs("window.__jarvisHttpRaw(" + q(id) + "," + code + "," + q(text) + ")");
+            } catch (Exception e) {
+                callJs("window.__jarvisHttpRaw(" + q(id) + ",0," + q("NETWORK: " + e) + ")");
+            } finally {
+                if (conn != null) conn.disconnect();
+            }
+        }, "jarvis-http").start();
+    }
+
+    private static boolean isPrivateHttpHost(String host) {
+        if (host == null) return false;
+        String h = host.toLowerCase(Locale.US);
+        if (h.isEmpty()) return false;
+        if (h.equals("localhost") || h.equals("::1") || h.equals("[::1]")) return true;
+        if (h.endsWith(".local")) return true;
+        if (!h.contains(".")) return true; // a local hostname such as "homeassistant"
+        return h.matches("^10\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$")
+                || h.matches("^127\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$")
+                || h.matches("^192\\.168\\.\\d{1,3}\\.\\d{1,3}$")
+                || h.matches("^172\\.(1[6-9]|2\\d|3[01])\\.\\d{1,3}\\.\\d{1,3}$")
+                || h.matches("^169\\.254\\.\\d{1,3}\\.\\d{1,3}$");
+    }
+
     private static String readAll(InputStream is) {
         if (is == null) return "";
         StringBuilder sb = new StringBuilder();
@@ -728,7 +820,7 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
 
     @JavascriptInterface
     public String version() {
-        return "1.5.0";
+        return "1.6.0";
     }
 
     @JavascriptInterface
