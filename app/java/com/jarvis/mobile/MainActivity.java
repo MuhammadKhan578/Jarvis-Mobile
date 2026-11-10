@@ -28,6 +28,7 @@ public class MainActivity extends Activity {
     private TtsEngine tts;
     private SpeechEngine speech;
     private String pendingCmd = null;
+    private boolean pageLoaded = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -78,6 +79,7 @@ public class MainActivity extends Activity {
             @Override
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
+                pageLoaded = true;
                 view.evaluateJavascript(
                         "console.log('JARVIS_SELFTEST '+(window.__jarvisSelfTest?window.__jarvisSelfTest():'no-selftest'))",
                         null);
@@ -166,6 +168,7 @@ public class MainActivity extends Activity {
         if (intent == null || web == null) return;
         String cmd = intent.getStringExtra("cmd");
         if (cmd != null && !cmd.isEmpty()) {
+            if (!pageLoaded) { pendingCmd = cmd; return; }
             web.evaluateJavascript(
                     "window.jarvisDebugCommand&&window.jarvisDebugCommand(" + org.json.JSONObject.quote(cmd) + ")",
                     null);

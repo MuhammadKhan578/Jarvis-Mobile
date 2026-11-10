@@ -97,6 +97,8 @@ public class NeuralTts {
     private boolean playedAny = false;
     private boolean finished = false;
     private final Map<Integer, File> ready = new HashMap<>();
+    private final Map<Integer, Boolean> skipped = new HashMap<>();
+    private int resolved = 0;
     private String voice = "Charon";
     private String apiKey = "";
     private String lastError = "";
@@ -151,6 +153,8 @@ public class NeuralTts {
             playedAny = false;
             finished = false;
             ready.clear();
+            skipped.clear();
+            resolved = 0;
             lastError = "";
             voice = (voiceName == null || voiceName.trim().isEmpty()) ? "Charon" : voiceName.trim();
             apiKey = key == null ? "" : key.trim();
@@ -174,6 +178,8 @@ public class NeuralTts {
             playing = false;
             finished = true;
             ready.clear();
+            skipped.clear();
+            resolved = 0;
         }
         main.post(() -> {
             try {
@@ -274,14 +280,14 @@ public class NeuralTts {
                 }
             }
             if (audio == null || audio.length <= 1000) {
-                fail(gen, last == null ? "Neural voice ne audio nahi diya." : last.getMessage());
+                sentenceFailed(gen, index, last == null ? "Neural voice ne audio nahi diya." : last.getMessage(), false);
                 return;
             }
             if (!usedModel.isEmpty()) goodModel = usedModel;
             store(useVoice, text, audio);
             onFileReady(gen, index, new File(ttsDir(), sha1(useVoice + "|" + text) + ".wav"));
         } catch (Exception e) {
-            fail(gen, e.getMessage() == null ? e.toString() : e.getMessage());
+            sentenceFailed(gen, index, e.getMessage() == null ? e.toString() : e.getMessage(), false);
         }
     }
 
@@ -405,27 +411,41 @@ public class NeuralTts {
 
     private void onFileReady(int gen, int index, File file) {
         synchronized (lock) {
-            if (gen != generation) return;
+            if (gen != generation || finished) return;
+            if (ready.containsKey(index) || skipped.containsKey(index)) return;
             ready.put(index, file);
+            resolved++;
         }
         main.post(() -> pump(gen));
     }
 
     private void pump(int gen) {
-        File file;
+        File file = null;
+        int index = -1;
         synchronized (lock) {
-            if (gen != generation || finished || playing) return;
-            if (nextToPlay >= total) return;
-            file = ready.get(nextToPlay);
-            if (file == null) return;
-            playing = true;
+            if (gen != generation || finished) return;
+            // A sentence that failed to synthesise is skipped, so the rest of
+            // the reply is still spoken instead of being thrown away.
+            while (nextToPlay < total && skipped.containsKey(nextToPlay)) nextToPlay++;
+            if (nextToPlay < total && !playing) {
+                file = ready.get(nextToPlay);
+                if (file != null) {
+                    playing = true;
+                    index = nextToPlay;
+                }
+            }
         }
-        playFile(gen, file);
+        if (file != null) {
+            playFile(gen, index, file);
+            return;
+        }
+        maybeFinish(gen);
     }
 
-    private void playFile(final int gen, File file) {
+    private void playFile(final int gen, final int index, File file) {
+        MediaPlayer mp = null;
         try {
-            MediaPlayer mp = new MediaPlayer();
+            mp = new MediaPlayer();
             mp.setAudioAttributes(new AudioAttributes.Builder()
                     .setUsage(AudioAttributes.USAGE_ASSISTANT)
                     .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
@@ -445,7 +465,7 @@ public class NeuralTts {
                 });
             });
             mp.setOnErrorListener((m, what, extra) -> {
-                fail(gen, "Audio play nahi hua (" + what + ").");
+                sentenceFailed(gen, index, "Audio play nahi hua (" + what + ").", true);
                 safeRelease(m);
                 return true;
             });
@@ -462,17 +482,58 @@ public class NeuralTts {
                 playedAny = true;
             }
         } catch (Exception e) {
-            fail(gen, "Audio play fail: " + e.getMessage());
+            sentenceFailed(gen, index, "Audio play fail: " + e.getMessage(), true);
+            if (mp != null) safeRelease(mp);
         }
     }
 
-    private void maybeFinish(int gen) {
+    /**
+     * A single sentence failed. Keep the rest of the reply alive: skip this
+     * index, continue with the next playable sentence, and only report an
+     * error when nothing at all could be played.
+     */
+    private void sentenceFailed(int gen, int index, String message, boolean fromPlayback) {
         synchronized (lock) {
             if (gen != generation || finished) return;
-            if (playing || nextToPlay < total) return;
-            finished = true;
+            if (message != null && !message.isEmpty()) lastError = message;
+            if (ready.containsKey(index) || skipped.containsKey(index)) return;
+            skipped.put(index, Boolean.TRUE);
+            resolved++;
+            if (fromPlayback) {
+                playing = false;
+                if (player != null) {
+                    try { player.release(); } catch (Exception ignored) { }
+                    player = null;
+                }
+            }
         }
-        main.post(this::notifyDone);
+        Log.w(TAG, "Sentence " + index + " skipped: " + message);
+        main.post(() -> pump(gen));
+    }
+
+    private void maybeFinish(int gen) {
+        boolean error = false;
+        String message;
+        synchronized (lock) {
+            if (gen != generation || finished) return;
+            while (nextToPlay < total && skipped.containsKey(nextToPlay)) nextToPlay++;
+            if (playing || nextToPlay < total || resolved < total) return;
+            finished = true;
+            message = lastError;
+            if (!playedAny) {
+                generation++;
+                error = true;
+            }
+        }
+        if (error) {
+            final String msg = (message == null || message.isEmpty()) ? "neural voice error" : message;
+            Log.w(TAG, "NeuralTts: " + msg);
+            main.post(() -> {
+                if (listener != null) listener.onNeuralError(msg);
+            });
+        } else {
+            main.post(this::notifyDone);
+        }
     }
 
     private void fail(int gen, String message) {

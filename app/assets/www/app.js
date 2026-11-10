@@ -121,7 +121,7 @@ const Native = window.Android || {
   },
   executeTool: () => JSON.stringify({ ok: false, message: 'Native tools available nahi hain.' }),
   getStatus: () => JSON.stringify({ ok: true, data: { online: navigator.onLine, battery: -1, network: 'unknown' } }),
-  version: () => '1.7.0-web',
+  version: () => '2.0.0-web',
   deviceSummary: () => 'Browser',
   toast: (m) => window.jarvisToast && window.jarvisToast(m),
   vibrate: () => { },
@@ -1822,7 +1822,7 @@ async function localCommand(text) {
     return true;
   }
 
-  if (/(unlock|open|band karo) (the )?(voice|awaaz|awaaz lock)|voice unlock|awaaz unlock/.test(low)) {
+  if (/(unlock|open) (the )?(voice|awaaz|awaaz lock)|voice unlock|awaaz unlock/.test(low)) {
     settings.voiceLocked = false;
     saveSettings();
     renderSettings();
@@ -1974,7 +1974,12 @@ async function localCommand(text) {
   const sceneMatch = low.match(/\b(morning|movie|sleep|guest|work|away|party|mehman|mehmaan|dawat|mehfil)\s+(mode|scene)\b/);
   if (sceneMatch) {
     const sceneName = sceneMatch[1];
-    await shSmartScene(sceneName);
+    const sceneReply = await shSmartScene(sceneName);
+    if (!/^Scene '/.test(String(sceneReply || ''))) {
+      // Unknown scene / real failure: report what actually happened.
+      respond(sceneReply, sceneReply);
+      return true;
+    }
     const l = replyFor(lang,
       sceneName + ' scene applied, sir.',
       'Ji sir, ' + sceneName + ' scene set kar diya.',
@@ -2780,7 +2785,7 @@ function renderSettings() {
 
   const about = $('#aboutText');
   if (about) {
-    let v = '1.2.0';
+    let v = '2.0.0';
     let d = 'Android';
     try { v = Native.version(); d = Native.deviceSummary(); } catch (e) { }
     about.textContent = 'Jarvis Mobile ' + v + ' · ' + d;
@@ -2871,8 +2876,9 @@ function closeSheets() {
 }
 
 function anySheetOpen() {
+  const overlay = $('#overlay');
   return $$('.sheet').some(s => !s.classList.contains('hidden')) ||
-    !$('#overlay').classList.contains('hidden');
+    !!(overlay && !overlay.classList.contains('hidden'));
 }
 
 function applySettingsInitial() {

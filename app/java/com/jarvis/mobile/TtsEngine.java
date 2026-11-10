@@ -71,6 +71,7 @@ public class TtsEngine implements TextToSpeech.OnInitListener {
     public void onInit(int status) {
         if (status != TextToSpeech.SUCCESS) {
             initFailed = true;
+            pendingRoman = ""; pendingUrdu = "";
             notifyError("Is phone par Text To Speech engine nahi mila. Settings > Text-to-speech check karein.");
             return;
         }
@@ -106,6 +107,7 @@ public class TtsEngine implements TextToSpeech.OnInitListener {
             }
         } catch (Exception e) {
             initFailed = true;
+            pendingRoman = ""; pendingUrdu = "";
             notifyError("TTS configure nahi ho saka: " + e.getMessage());
         }
     }
@@ -240,6 +242,12 @@ public class TtsEngine implements TextToSpeech.OnInitListener {
             if (!ready) {
                 pendingRoman = roman == null ? "" : roman;
                 pendingUrdu = urdu == null ? "" : urdu;
+                // A failed engine will never become ready, so tell the web layer
+                // instead of leaving it waiting until its safety timeout.
+                if (initFailed) {
+                    pendingRoman = ""; pendingUrdu = "";
+                    notifyError("Android voice engine start nahi ho saka. Settings > Text-to-speech check karein.");
+                }
                 return;
             }
             boolean urduVoice = urdu != null && !urdu.trim().isEmpty() && hasUrduVoice();

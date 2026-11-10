@@ -198,8 +198,20 @@ public final class AppIntents {
         if (name.isEmpty()) return res(false, "App ka naam nahi mila.", false, null);
 
         String pkg = null;
+        // Exact name first, then a whole-word match (longest key wins).  A plain
+        // substring check used to turn "headphone" into the Phone app.
         for (Map.Entry<String, String> e : APPS.entrySet()) {
-            if (name.equals(e.getKey()) || name.contains(e.getKey())) { pkg = e.getValue(); break; }
+            if (name.equals(e.getKey())) { pkg = e.getValue(); break; }
+        }
+        if (pkg == null) {
+            int best = 0;
+            for (Map.Entry<String, String> e : APPS.entrySet()) {
+                String key = e.getKey();
+                if (key.length() > best && containsWord(name, key)) {
+                    best = key.length();
+                    pkg = e.getValue();
+                }
+            }
         }
         if ("camera".equals(pkg)) return openCamera(c);
         if ("music".equals(pkg)) {
@@ -231,6 +243,25 @@ public final class AppIntents {
                     true, null);
         }
         return res(false, "Phone par '" + rawName + "' app nahi mili.", false, null);
+    }
+
+    /**
+     * True when {@code key} appears in {@code text} as a whole word/phrase, so
+     * "headphone" never matches "phone" and "google maps" is preferred over
+     * "maps" (the longest key wins at the call site).
+     */
+    private static boolean containsWord(String text, String key) {
+        if (key == null || key.isEmpty()) return false;
+        int from = 0;
+        while (true) {
+            int i = text.indexOf(key, from);
+            if (i < 0) return false;
+            int end = i + key.length();
+            boolean leftOk = i == 0 || !Character.isLetterOrDigit(text.charAt(i - 1));
+            boolean rightOk = end >= text.length() || !Character.isLetterOrDigit(text.charAt(end));
+            if (leftOk && rightOk) return true;
+            from = i + 1;
+        }
     }
 
     private static String appLabel(Context c, String pkg) {

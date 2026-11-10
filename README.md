@@ -19,6 +19,13 @@ APK with the Android SDK command-line tools.
   into sentences, synthesised in parallel and played in order, so the first
   words start in a couple of seconds. Falls back to the Android voice if the
   network or key is missing.
+- **Full-reply voice (v2.0.0)** — if one sentence fails to synthesise or play,
+  Jarvis skips only that sentence and keeps speaking the rest, so replies no
+  longer stop halfway. A failed Android voice engine reports an error instead
+  of hanging.
+- **Clearer voice and app commands (v2.0.0)** — "band karo voice" now locks the
+  voice (it used to unlock it), and app names match whole words only, so
+  "headphone" no longer opens the Phone app.
 - **Phone automation (optional)** — with the "Jarvis Automation" accessibility
   service on, Jarvis can read the current screen, tap any visible button, type
   into fields, and press Back / Home / Recents / Notifications.
@@ -128,7 +135,7 @@ powershell -ExecutionPolicy Bypass -File .\build_apk.ps1 `
   -Sdk "C:\Android\Sdk" -Jdk "C:\Program Files\Java\jdk-17"
 ```
 
-Output: `JarvisMobile.apk` in this folder. Version 1.7.0 (versionCode 9).
+Output: `JarvisMobile.apk` in this folder. Version 2.0.0 (versionCode 10).
 
 On the first build the script creates a local development keystore at
 `keystore/jarvis.keystore` with a random password saved in
