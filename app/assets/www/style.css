@@ -626,6 +626,24 @@ body[data-state="speaking"] .state-label { color: #9ff6ff; }
   color: var(--danger);
   font-size: 12px;
 }
+.memory-item.pinned { border-color: rgba(56, 240, 255, .38); background: rgba(56, 240, 255, .04); }
+.memory-item .memory-cat {
+  display: block;
+  margin-bottom: 3px;
+  font-family: var(--font-hud);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: .7px;
+  text-transform: uppercase;
+  color: var(--cyan);
+  opacity: .8;
+}
+.memory-item .memory-pin {
+  border-color: rgba(56, 240, 255, .3);
+  background: rgba(56, 240, 255, .07);
+  color: var(--cyan);
+  font-size: 14px;
+}
 .voice-item {
   display: flex;
   flex-direction: column;

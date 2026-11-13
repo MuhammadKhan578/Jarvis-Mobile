@@ -121,7 +121,7 @@ const Native = window.Android || {
   },
   executeTool: () => JSON.stringify({ ok: false, message: 'Native tools available nahi hain.' }),
   getStatus: () => JSON.stringify({ ok: true, data: { online: navigator.onLine, battery: -1, network: 'unknown' } }),
-  version: () => '2.0.0-web',
+  version: () => '2.1.0-web',
   deviceSummary: () => 'Browser',
   toast: (m) => window.jarvisToast && window.jarvisToast(m),
   vibrate: () => { },
@@ -299,10 +299,265 @@ const saved = loadJSON(LS.settings, {});
 let settings = Object.assign({}, DEFAULTS, saved);
 settings.rate = clamp(Number(settings.rate) || 0.97, 0.7, 1.3);
 
-let memory = loadJSON(LS.memory, null);
-if (!memory || !Array.isArray(memory.facts)) {
-  memory = { facts: SEED_FACTS.slice(), episodes: [] };
+/* ------------------------------------------------------------ memory 2.0 */
+/* Structured long-term memory: categorised facts, pins, a rolling note about
+   earlier conversations, and query-aware recall. Everything stays on the
+   phone. The old flat string list is migrated automatically. */
+const MEM_CATEGORIES = ['identity', 'preference', 'project', 'goal', 'routine', 'health', 'people', 'work', 'general'];
+const MEM_LABELS = {
+  identity: 'About you', preference: 'Preferences', project: 'Projects', goal: 'Goals',
+  routine: 'Routine', health: 'Health', people: 'People', work: 'Work / Study', general: 'Other'
+};
+const MEM_STOP = new Set([
+  'the', 'and', 'for', 'you', 'your', 'are', 'was', 'were', 'with', 'this', 'that', 'have', 'has', 'had',
+  'what', 'when', 'where', 'who', 'why', 'how', 'did', 'does', 'about', 'remember', 'please', 'tell', 'say',
+  'kya', 'kia', 'hai', 'hain', 'tha', 'thi', 'aur', 'mera', 'meri', 'mere', 'mujhe', 'main', 'mein', 'mai',
+  'ka', 'ki', 'ke', 'ko', 'se', 'par', 'per', 'bhi', 'hi', 'na', 'nahi', 'koi', 'kuch', 'yaad', 'batao', 'bata',
+  'aap', 'tum', 'tumhe', 'apna', 'apni', 'liye', 'raha', 'rahi', 'hoga', 'hua', 'kar', 'karo', 'mera'
+]);
+
+function memClean(text) {
+  return String(text == null ? '' : text).replace(/\s+/g, ' ').trim().slice(0, 400);
 }
+function memKey(text) {
+  return memClean(text).toLowerCase().replace(/[^\w\s\u0600-\u06FF]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+function memTokens(text) {
+  const out = new Set();
+  String(text || '').toLowerCase().replace(/[^\w\s\u0600-\u06FF]+/g, ' ').split(/\s+/).forEach(w => {
+    if (w.length >= 3 && !MEM_STOP.has(w)) out.add(w);
+  });
+  return out;
+}
+function memCategoryFor(text) {
+  const t = ' ' + memClean(text).toLowerCase() + ' ';
+  if (/\b(mera naam|my name|naam hai|birthday|salary|age|umar|city|shehar|rehta|rehti|live in|born)\b/.test(t)) return 'identity';
+  if (/\b(pasand|like|love|favourite|favorite|prefer|dislike|nafrat|chai|coffee|food|khana|music|song)\b/.test(t)) return 'preference';
+  if (/\b(project|startup|business|app|website|client|code|build|bana raha|bana rahi)\b/.test(t)) return 'project';
+  if (/\b(goal|target|plan|future|chahta|chahti|want to|seekhna|learn)\b/.test(t)) return 'goal';
+  if (/\b(routine|roz|daily|every day|habit|schedule|subah|morning|raat)\b/.test(t)) return 'routine';
+  if (/\b(health|dawai|medicine|doctor|gym|sleep|weight|bimari)\b/.test(t)) return 'health';
+  if (/\b(dost|friend|boss|teacher|ustad|wife|husband|family|bhai|behen)\b/.test(t)) return 'people';
+  if (/\b(job|office|school|college|university|exam|class|kaam)\b/.test(t)) return 'work';
+  return 'general';
+}
+function memNewId() {
+  return 'm' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
+function memNormalizeFact(f, index) {
+  if (typeof f === 'string') {
+    const text = memClean(f);
+    if (!text) return null;
+    return {
+      id: 'legacy' + index, text, category: memCategoryFor(text), importance: 3,
+      pinned: false, created: Date.now(), updated: Date.now(), hits: 0
+    };
+  }
+  if (!f || typeof f !== 'object') return null;
+  const text = memClean(f.text || f.fact || f.value || '');
+  if (!text) return null;
+  return {
+    id: String(f.id || memNewId()),
+    text,
+    category: MEM_CATEGORIES.indexOf(f.category) >= 0 ? f.category : memCategoryFor(text),
+    importance: clamp(Number(f.importance) || 3, 1, 5),
+    pinned: !!f.pinned,
+    created: Number(f.created) || Date.now(),
+    updated: Number(f.updated || f.created) || Date.now(),
+    hits: Math.max(0, Number(f.hits) || 0)
+  };
+}
+function normalizeMemory(raw) {
+  const out = { version: 2, facts: [], episodes: [], profile: {}, thread: '', threadAt: 0 };
+  if (raw && typeof raw === 'object') {
+    (Array.isArray(raw.facts) ? raw.facts : []).forEach((f, i) => {
+      const n = memNormalizeFact(f, i);
+      if (n) out.facts.push(n);
+    });
+    (Array.isArray(raw.episodes) ? raw.episodes : []).forEach(e => {
+      if (typeof e === 'string') {
+        const text = memClean(e);
+        if (text) out.episodes.push({ text, t: Date.now() });
+      } else if (e && typeof e === 'object') {
+        const text = memClean(e.text || e.summary || '');
+        if (text) out.episodes.push({ text, t: Number(e.t) || Date.now() });
+      }
+    });
+    if (raw.profile && typeof raw.profile === 'object') {
+      Object.keys(raw.profile).forEach(k => { out.profile[k] = memClean(raw.profile[k]); });
+    }
+    out.thread = memClean(raw.thread || '').slice(-600);
+    out.threadAt = Number(raw.threadAt) || 0;
+  }
+  if (!out.facts.length && Array.isArray(SEED_FACTS)) {
+    SEED_FACTS.forEach((f, i) => {
+      const n = memNormalizeFact(f, i);
+      if (n) out.facts.push(n);
+    });
+  }
+  return out;
+}
+function memRememberName(text) {
+  const m = String(text || '').match(/\b(?:mera\s+naam|my\s+name\s+is)\s+([A-Za-z\u0600-\u06FF][A-Za-z\u0600-\u06FF .'-]{1,30}?)\s*(?:hai|is)?[.!]?$/i);
+  if (!m) return '';
+  const name = m[1].replace(/\s+/g, ' ').trim();
+  if (!name || /^(kya|kia|nahi|nai|hai|is|the)$/i.test(name)) return '';
+  memory.profile = memory.profile || {};
+  memory.profile.name = name;
+  memory.facts = memory.facts.filter(f => !(f.category === 'identity' && /^User name is /i.test(f.text)));
+  memory.facts.push({
+    id: memNewId(), text: 'User name is ' + name + '.', category: 'identity', importance: 5,
+    pinned: true, created: Date.now(), updated: Date.now(), hits: 1
+  });
+  saveJSON(LS.memory, memory);
+  return name;
+}
+function memSave(text, opts) {
+  const o = opts || {};
+  const clean = memClean(text);
+  if (!clean) return { ok: false, already: false, fact: null };
+  const key = memKey(clean);
+  const existing = memory.facts.find(f => {
+    const k = memKey(f.text);
+    return k === key || (key.length >= 12 && k.indexOf(key) >= 0) || (k.length >= 12 && key.indexOf(k) >= 0);
+  });
+  if (existing) {
+    existing.updated = Date.now();
+    existing.hits = (existing.hits || 0) + 1;
+    if (o.pin) existing.pinned = true;
+    if (o.importance) existing.importance = clamp(Number(o.importance) || 3, 1, 5);
+    saveJSON(LS.memory, memory);
+    return { ok: true, already: true, fact: existing };
+  }
+  const fact = {
+    id: memNewId(),
+    text: clean,
+    category: MEM_CATEGORIES.indexOf(o.category) >= 0 ? o.category : memCategoryFor(clean),
+    importance: clamp(Number(o.importance) || 3, 1, 5),
+    pinned: !!o.pin,
+    created: Date.now(), updated: Date.now(), hits: 0
+  };
+  memory.facts.push(fact);
+  if (memory.facts.length > 200) {
+    memory.facts.sort((a, b) => (b.pinned - a.pinned) || (b.importance - a.importance) || ((b.updated || 0) - (a.updated || 0)));
+    memory.facts = memory.facts.slice(0, 200);
+  }
+  saveJSON(LS.memory, memory);
+  return { ok: true, already: false, fact };
+}
+function memMatch(f, qTokens, qKey) {
+  const t = memTokens(f.text);
+  let overlap = 0;
+  qTokens.forEach(w => { if (t.has(w)) overlap++; });
+  const exact = qKey.length >= 4 && memKey(f.text).indexOf(qKey) >= 0;
+  return { overlap, exact };
+}
+function memSearch(query, limit) {
+  const qTokens = memTokens(query);
+  const qKey = memKey(query);
+  if (!qKey) return [];
+  const out = [];
+  for (const f of memory.facts) {
+    const m = memMatch(f, qTokens, qKey);
+    if (!m.overlap && !m.exact) continue;
+    const score = m.overlap * 3 + (m.exact ? 8 : 0) + (Number(f.importance) || 3) * 0.6 + (f.pinned ? 4 : 0);
+    out.push({ f, score });
+  }
+  out.sort((a, b) => b.score - a.score);
+  return out.slice(0, Math.max(1, limit || 6)).map(x => x.f);
+}
+function memRemove(query) {
+  const qTokens = memTokens(query);
+  const qKey = memKey(query);
+  if (!qKey) return [];
+  const removed = memory.facts.filter(f => {
+    if (f.pinned) return false;
+    const m = memMatch(f, qTokens, qKey);
+    return m.exact || (qTokens.size >= 2 && m.overlap >= 2 && m.overlap / qTokens.size >= 0.8);
+  });
+  if (!removed.length) return [];
+  const ids = new Set(removed.map(f => f.id));
+  memory.facts = memory.facts.filter(f => !ids.has(f.id));
+  saveJSON(LS.memory, memory);
+  return removed;
+}
+function memPinFact(query, pinned) {
+  const hits = memSearch(query, 1);
+  if (!hits.length) return null;
+  hits[0].pinned = !!pinned;
+  hits[0].updated = Date.now();
+  saveJSON(LS.memory, memory);
+  return hits[0];
+}
+function memContext(query) {
+  const fast = isFastMode();
+  const limit = fast ? 10 : 20;
+  const chosen = [];
+  const seen = new Set();
+  const push = f => {
+    if (f && !seen.has(f.id) && chosen.length < limit) { seen.add(f.id); chosen.push(f); }
+  };
+  memory.facts.filter(f => f.pinned)
+    .sort((a, b) => (b.updated || 0) - (a.updated || 0))
+    .slice(0, fast ? 4 : 8).forEach(push);
+  memSearch(query, limit).forEach(push);
+  if (chosen.length < (fast ? 5 : 10)) {
+    memory.facts.slice().sort((a, b) => (b.importance - a.importance) || ((b.updated || 0) - (a.updated || 0))).forEach(push);
+  }
+  const bits = [];
+  if (memory.profile && memory.profile.name) bits.push('User name: ' + memory.profile.name + '.');
+  bits.push(chosen.length
+    ? chosen.map(f => '- [' + f.category + (f.pinned ? ', pinned' : '') + '] ' + f.text.slice(0, 220)).join('\n')
+    : '- (nothing saved yet)');
+  if (memory.thread) bits.push('Earlier conversation: ' + memory.thread.slice(-500));
+  const eps = (memory.episodes || []).slice(-(fast ? 2 : 4));
+  if (eps.length) bits.push('Past sessions: ' + eps.map(e => e.text.slice(0, 180)).join(' | '));
+  return bits.join('\n').slice(0, fast ? 2800 : 4600);
+}
+function memOverview() {
+  const facts = memory.facts || [];
+  if (!facts.length) {
+    return 'Sir, abhi mere paas aap ke baare mein koi memory nahi hai. Aap "yaad rakho ..." bol kar kuch bhi sikha sakte hain.';
+  }
+  const groups = {};
+  facts.forEach(f => { (groups[f.category] = groups[f.category] || []).push(f); });
+  const parts = [];
+  Object.keys(groups).forEach(cat => {
+    const items = groups[cat]
+      .sort((a, b) => (b.pinned - a.pinned) || (b.importance - a.importance) || ((b.updated || 0) - (a.updated || 0)))
+      .slice(0, 4)
+      .map(f => f.text.replace(/^(?:mera|meri|mujhe|my)\s+/i, '').slice(0, 100));
+    parts.push((MEM_LABELS[cat] || 'Other') + ': ' + items.join('; '));
+  });
+  const text = 'Sir, mujhe yeh yaad hai. ' + parts.join('. ') + '.';
+  return text.length > 950 ? text.slice(0, 947) + '...' : text;
+}
+function memRecall(query) {
+  const q = memClean(query);
+  if (!q) return memOverview();
+  const hits = memSearch(q, 6);
+  if (!hits.length) return "Sir, '" + q + "' ke baare mein mujhe kuch yaad nahi hai.";
+  return 'Sir, ' + q + ' ke baare mein mujhe yeh yaad hai: ' +
+    hits.map(f => f.text.slice(0, 160)).join('; ') + '.';
+}
+function memStats() {
+  const pins = (memory.facts || []).filter(f => f.pinned).length;
+  return 'Sir, memory mein ' + (memory.facts || []).length + ' baatein hain, ' + pins +
+    ' pinned hain, aur ' + (memory.episodes || []).length + ' purani baatein summary mein hain.';
+}
+function memThreadUpdate() {
+  const upto = Number(memory.threadAt) || 0;
+  if (history.length - upto < 6) return;
+  const users = history.slice(Math.max(0, history.length - 14))
+    .filter(h => h.role === 'user' && h.text)
+    .map(h => memClean(h.text).slice(0, 90));
+  if (!users.length) return;
+  memory.thread = ((memory.thread ? memory.thread + ' · ' : '') + users.join(' · ')).slice(-600);
+  memory.threadAt = history.length;
+  saveJSON(LS.memory, memory);
+}
+
+let memory = normalizeMemory(loadJSON(LS.memory, null));
 let history = loadJSON(LS.history, []);
 if (!Array.isArray(history)) history = [];
 
@@ -1494,6 +1749,7 @@ function respond(roman, urdu, opts) {
   addBubble('jarvis', roman, urdu);
   history.push({ role: 'model', text: roman });
   trimHistory();
+  memThreadUpdate();
   saveJSON(LS.history, history);
   try { console.log('JARVIS_REPLY ' + JSON.stringify({ roman: roman, urdu: urdu })); } catch (e) { }
   try { Native.log('REPLY ' + roman); } catch (e) { }
@@ -1505,7 +1761,11 @@ function respond(roman, urdu, opts) {
 }
 
 function trimHistory() {
-  if (history.length > 40) history = history.slice(history.length - 40);
+  if (history.length > 40) {
+    const drop = history.length - 40;
+    history = history.slice(drop);
+    if (memory && memory.threadAt) memory.threadAt = Math.max(0, memory.threadAt - drop);
+  }
 }
 
 function renderHistory() {
@@ -1868,15 +2128,76 @@ async function localCommand(text) {
     openSheet('sheet');
     return true;
   }
-  if (/memory (kholo|dikhao|show)|show memory|yaad kya hai|kya yaad hai/.test(low)) {
+  if (/^(?:memory\s+(?:kholo|dikhao|show)|show\s+memory|memory\s+open|memory\s+khulo)$/.test(low)) {
     openMemory();
     return true;
   }
-  if (/clear memory|memory saaf|sab bhool jao|bhool jao sab/.test(low)) {
-    memory.facts = [];
+  if (/clear memory|memory saaf|sab bhool jao|bhool jao sab|memory clear/.test(low)) {
+    memory = normalizeMemory(null);
     saveJSON(LS.memory, memory);
     renderMemory();
     respond(LINES.memoryCleared.roman, LINES.memoryCleared.urdu);
+    return true;
+  }
+  if (/^(?:memory\s+(?:stats|status|kitni|kitna)|yaad\s+kitna\s+hai)\??$/.test(low)) {
+    respond(memStats(), '');
+    return true;
+  }
+  if (/^(?:mujhe\s+)?(?:mere\s+baare\s+(?:me|mein|mai)\s+)?(?:kya\s+yaad\s+hai|yaad\s+kya\s+hai|memory\s+batao|memory\s+recap|what\s+do\s+you\s+remember|tumhe\s+kya\s+yaad\s+hai)\??$/.test(low)) {
+    respond(memOverview(), '');
+    return true;
+  }
+  const pinMatch = text.match(/^(?:isay|isko|yeh|ye)\s+(?:kabhi\s+)?(?:mat|na)\s+bhoolna[\s:,]+(.+)$/i) ||
+    text.match(/^(?:kabhi\s+mat\s+bhoolna|pin\s+karo|pin\s+this|never\s+forget)[\s:,]+(.+)$/i);
+  if (pinMatch) {
+    memRememberName(pinMatch[1]);
+    memSave(pinMatch[1], { importance: 5, pin: true });
+    renderMemory();
+    const l = replyFor(lang, 'Pinned forever, sir.', 'Hamesha ke liye yaad rakh liya, sir.', 'ہمیشہ کے لیے یاد رکھ لیا، سر۔');
+    respond(l.roman, l.urdu);
+    return true;
+  }
+  const saveMatch = text.match(/^(?:mujhe\s+)?(?:yaad\s+rakho|yaad\s+rakhna|yaad\s+rakhein|remember(?:\s+this)?|note\s+karo)[\s:,]+(?:ke\s+|that\s+)?(.{2,300})$/i);
+  if (saveMatch) {
+    memRememberName(saveMatch[1]);
+    const saved = memSave(saveMatch[1], { importance: 4 });
+    renderMemory();
+    const l = saved.already
+      ? replyFor(lang, 'Already remembered, sir.', 'Yeh baat pehle se yaad hai, sir.', 'یہ بات پہلے سے یاد ہے، سر۔')
+      : replyFor(lang, 'Remembered, sir.', 'Yaad rakh liya, sir.', 'یاد رکھ لیا، سر۔');
+    respond(l.roman, l.urdu);
+    return true;
+  }
+  const forgetMatch = text.match(/^(?:bhool\s+jao|bhool\s+do|bhool\s+jana|forget|memory\s+se\s+hatao)[\s:,]+(?:ke\s+|that\s+)?(.{2,200})$/i);
+  if (forgetMatch) {
+    const pinnedHit = memSearch(forgetMatch[1], 1)[0];
+    if (pinnedHit && pinnedHit.pinned) {
+      respond('Sir, woh baat pinned hai. Pehle memory mein unpin karein ya "sab bhool jao" bolein.',
+        'سر، وہ بات پن شدہ ہے۔ پہلے اسے اَن پن کریں یا "سب بھول جاؤ" بولیں۔');
+      return true;
+    }
+    const removed = memRemove(forgetMatch[1]);
+    renderMemory();
+    const l = removed.length
+      ? replyFor(lang, 'Forgotten, sir.', 'Bhool gaya, sir.', 'بھول گیا، سر۔')
+      : replyFor(lang, 'I could not find that memory, sir.', 'Sir, mujhe aisi koi baat yaad nahi mili.', 'سر، مجھے ایسی کوئی بات یاد نہیں ملی۔');
+    respond(l.roman, l.urdu);
+    return true;
+  }
+  const recallMatch = text.match(/^(.{2,80}?)\s+ke\s+(?:baare|bare)\s+(?:me|mein|mai)\s+(?:kya\s+)?yaad\s+hai\??$/i) ||
+    text.match(/^(?:do\s+you\s+remember|tumhe(?:n)?\s+yaad\s+hai|aapko\s+yaad\s+hai)\s+(.{2,80})$/i);
+  if (recallMatch) {
+    respond(memRecall(recallMatch[1]), '');
+    return true;
+  }
+  const nameSeen = memRememberName(text);
+  if (nameSeen) {
+    renderMemory();
+    const l = replyFor(lang,
+      'Noted, ' + nameSeen + ' sir. I will remember your name.',
+      'Ji ' + nameSeen + ' sir, aap ka naam yaad rakh liya.',
+      'جی سر، آپ کا نام یاد رکھ لیا۔');
+    respond(l.roman, l.urdu);
     return true;
   }
   if (/mic test|microphone test|mic check/.test(low)) {
@@ -2332,17 +2653,44 @@ function toolDeclarations() {
     },
     {
       name: 'remember',
-      description: 'Save a lasting fact about the user (name, preferences, important things).',
+      description: 'Save a lasting fact about the user in long-term memory (name, preferences, projects, goals, people, routine). Use pin:true only for a detail that must never be forgotten.',
       parameters: {
         type: 'OBJECT',
-        properties: { fact: { type: 'STRING' } },
+        properties: {
+          fact: { type: 'STRING', description: 'Short English fact, e.g. "Likes black coffee in the morning."' },
+          category: { type: 'STRING', description: 'identity, preference, project, goal, routine, health, people, work or general' },
+          importance: { type: 'INTEGER', description: '1-5, default 3' },
+          pin: { type: 'BOOLEAN', description: 'true keeps this memory forever' }
+        },
         required: ['fact']
+      }
+    },
+    {
+      name: 'recall_memory',
+      description: 'Search long-term memory (facts, pins and earlier conversation notes) for anything about a topic. Use before saying you do not remember.',
+      parameters: {
+        type: 'OBJECT',
+        properties: {
+          query: { type: 'STRING', description: 'Topic to recall, e.g. "my project" or "favourite drink"' }
+        },
+        required: ['query']
+      }
+    },
+    {
+      name: 'forget_memory',
+      description: 'Delete one saved memory that matches the query. Only use when the user asks to forget it.',
+      parameters: {
+        type: 'OBJECT',
+        properties: {
+          query: { type: 'STRING', description: 'Text or topic to forget' }
+        },
+        required: ['query']
       }
     }
   ];
 }
 
-function buildSystemPrompt() {
+function buildSystemPrompt(userText) {
   const langMode = settings.langMode;
   const langLine = langMode === 'en'
     ? 'The user chose ENGLISH ONLY. Reply in English. The ROMAN line must be plain English and the URDU line repeats the same English.'
@@ -2350,12 +2698,9 @@ function buildSystemPrompt() {
       ? 'The user chose ROMAN URDU. Reply in natural Pakistani Roman Urdu (simple everyday words, like a friend talking), and give the same in Urdu script.'
       : 'Match the user: English input -> English reply; Roman Urdu / Urdu / Hindi input -> natural Pakistani Roman Urdu reply. The ROMAN line must sound like a real Pakistani person talking casually, never like an English sentence with Urdu words pasted in.';
 
-  // Fast mode sends only the most recent facts: a long prompt delays every
-  // reply. Smart mode keeps the full list for deeper questions.
-  const factList = isFastMode() ? (memory.facts || []).slice(-16) : (memory.facts || []);
-  const facts = factList.length
-    ? factList.map(f => '- ' + f).join('\n')
-    : '- (nothing saved yet)';
+  // Only relevant, recent and pinned memories go into the prompt. This keeps
+  // the request small (faster replies) while still recalling the right detail.
+  const memoryBlock = memContext(userText || '');
 
   let automation = false;
   try { automation = !!Native.hasAutomation(); } catch (e) { }
@@ -2380,10 +2725,10 @@ function buildSystemPrompt() {
     'AUTOMATION: ' + (automation
       ? 'ON — you can tap through other apps. Use ui_dump before tapping.'
       : 'OFF — ui_click / ui_type / ui_dump / system_action and full install will ask the user to enable it. App opens, Play Store search and normal tools still work.'),
-    'MEMORY: when the user shares something lasting or says "yaad rakho", call remember with a short English fact. Never read the list out.',
+    'MEMORY: you have real long-term memory on this phone. When the user shares something lasting, or says "yaad rakho" / "never forget", call remember with a short English fact, a category and importance (pin:true for a permanent detail). When asked what you remember about a topic, call recall_memory FIRST; never say you forgot before checking. Use forget_memory when the user asks you to forget something. Answer naturally and never read the whole list out.',
     'SPEED AND STYLE: your answer is spoken aloud. Answer the question asked, do not pad. Actions: 1-2 short sentences. Questions: up to 4 short sentences. No lists, markdown, emojis or stage directions.',
     'MEMORY (about the user):',
-    facts,
+    memoryBlock,
     'LANGUAGE: ' + langLine,
     'NOW: ' + timeText,
     'OUTPUT: exactly two lines, nothing else:',
@@ -2467,13 +2812,26 @@ async function runTool(name, args) {
     return { ok: true, message: await newsBrief(args && args.topic, args && args.count) };
   }
   if (name === 'remember') {
-    const fact = String((args && args.fact) || '').trim();
+    const fact = String((args && (args.fact || args.text)) || '').trim();
     if (!fact) return { ok: false, message: 'Kya yaad rakhna hai?' };
-    if (!memory.facts.includes(fact)) memory.facts.push(fact);
-    if (memory.facts.length > 60) memory.facts = memory.facts.slice(-60);
-    saveJSON(LS.memory, memory);
+    const saved = memSave(fact, {
+      category: String((args && args.category) || ''),
+      importance: args && args.importance,
+      pin: !!(args && args.pin)
+    });
     renderMemory();
-    return { ok: true, message: 'Yaad rakh liya.' };
+    return { ok: true, message: saved.already ? 'Yeh baat pehle se yaad hai.' : 'Yaad rakh liya.' };
+  }
+  if (name === 'recall_memory') {
+    const query = String((args && args.query) || '').trim();
+    return { ok: true, message: query ? memRecall(query) : memOverview() };
+  }
+  if (name === 'forget_memory') {
+    const query = String((args && args.query) || '').trim();
+    const removed = memRemove(query);
+    renderMemory();
+    if (!removed.length) return { ok: false, message: 'Mujhe aisi koi memory nahi mili.' };
+    return { ok: true, message: 'Bhool gaya: ' + removed.map(f => f.text).join('; ') };
   }
   return callTool(name, args || {});
 }
@@ -2564,7 +2922,7 @@ async function askBrain(userText) {
   if (!contents.length || contents[contents.length - 1].role !== 'user') {
     contents.push({ role: 'user', parts: [{ text: userText }] });
   }
-  const systemPrompt = buildSystemPrompt();
+  const systemPrompt = buildSystemPrompt(userText);
   const models = settings.model === 'smart' ? SMART_MODELS : FAST_MODELS;
   let ordered = models;
   try {
@@ -2781,11 +3139,14 @@ function renderSettings() {
   }
 
   const memCount = $('#memoryCount');
-  if (memCount) memCount.textContent = memory.facts.length + ' baatein yaad hain.';
+  if (memCount) {
+    const pins = (memory.facts || []).filter(f => f.pinned).length;
+    memCount.textContent = (memory.facts || []).length + ' baatein yaad hain' + (pins ? ' (' + pins + ' pinned)' : '') + '.';
+  }
 
   const about = $('#aboutText');
   if (about) {
-    let v = '2.0.0';
+    let v = '2.1.0';
     let d = 'Android';
     try { v = Native.version(); d = Native.deviceSummary(); } catch (e) { }
     about.textContent = 'Jarvis Mobile ' + v + ' · ' + d;
@@ -2910,34 +3271,56 @@ function renderMemory() {
   const list = $('#memoryList');
   if (!list) return;
   list.textContent = '';
-  const facts = memory.facts || [];
+  const facts = (memory.facts || []).slice().sort((a, b) =>
+    (b.pinned - a.pinned) || (b.importance - a.importance) || ((b.updated || 0) - (a.updated || 0)));
   if (!facts.length) {
     const p = document.createElement('p');
     p.className = 'hint';
-    p.textContent = 'Abhi koi memory nahi hai.';
+    p.textContent = 'Abhi koi memory nahi hai. "Yaad rakho ..." bol kar kuch bhi sikhayein.';
     list.appendChild(p);
-    return;
+  } else {
+    facts.forEach(fact => {
+      const row = document.createElement('div');
+      row.className = 'memory-item' + (fact.pinned ? ' pinned' : '');
+      const span = document.createElement('span');
+      const cat = document.createElement('b');
+      cat.className = 'memory-cat';
+      cat.textContent = MEM_LABELS[fact.category] || 'Other';
+      span.appendChild(cat);
+      span.appendChild(document.createTextNode(fact.text));
+      const pin = document.createElement('button');
+      pin.className = 'memory-pin';
+      pin.textContent = fact.pinned ? '★' : '☆';
+      pin.title = fact.pinned ? 'Unpin' : 'Pin forever';
+      pin.setAttribute('aria-label', pin.title);
+      pin.onclick = () => {
+        fact.pinned = !fact.pinned;
+        fact.updated = Date.now();
+        saveJSON(LS.memory, memory);
+        renderMemory();
+        renderSettings();
+      };
+      const del = document.createElement('button');
+      del.textContent = '✕';
+      del.setAttribute('aria-label', 'Delete');
+      del.onclick = () => {
+        memory.facts = memory.facts.filter(f => f.id !== fact.id);
+        saveJSON(LS.memory, memory);
+        renderMemory();
+        renderSettings();
+      };
+      row.appendChild(span);
+      row.appendChild(pin);
+      row.appendChild(del);
+      list.appendChild(row);
+    });
   }
-  facts.forEach((fact, index) => {
-    const row = document.createElement('div');
-    row.className = 'memory-item';
-    const span = document.createElement('span');
-    span.textContent = fact;
-    const del = document.createElement('button');
-    del.textContent = '✕';
-    del.setAttribute('aria-label', 'Delete');
-    del.onclick = () => {
-      memory.facts.splice(index, 1);
-      saveJSON(LS.memory, memory);
-      renderMemory();
-      renderSettings();
-    };
-    row.appendChild(span);
-    row.appendChild(del);
-    list.appendChild(row);
-  });
   const count = $('#memoryCount');
-  if (count) count.textContent = facts.length + ' baatein yaad hain.';
+  if (count) {
+    const pins = (memory.facts || []).filter(f => f.pinned).length;
+    count.textContent = (memory.facts || []).length + ' baatein yaad hain' +
+      (pins ? ' (' + pins + ' pinned)' : '') + '.';
+  }
 }
 
 function openMemory() {
@@ -2949,9 +3332,9 @@ function addMemoryFact() {
   if (!input) return;
   const fact = input.value.trim();
   if (!fact) return;
-  if (!memory.facts.includes(fact)) memory.facts.push(fact);
+  memRememberName(fact);
+  memSave(fact, { importance: 3 });
   input.value = '';
-  saveJSON(LS.memory, memory);
   renderMemory();
   renderSettings();
   toast('Yaad rakh liya.');
@@ -3479,7 +3862,7 @@ function bindEvents() {
   });
   $('#memoryClear').addEventListener('click', () => {
     if (!confirm('Sab memory clear karni hai?')) return;
-    memory.facts = [];
+    memory = normalizeMemory(null);
     saveJSON(LS.memory, memory);
     renderMemory();
     renderSettings();

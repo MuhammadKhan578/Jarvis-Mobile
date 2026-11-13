@@ -23,6 +23,13 @@ APK with the Android SDK command-line tools.
   Jarvis skips only that sentence and keeps speaking the rest, so replies no
   longer stop halfway. A failed Android voice engine reports an error instead
   of hanging.
+- **Memory 2.0 (v2.1.0)** — long-term memory is now structured by category
+  (about you, preferences, projects, goals, routine, health, people, work).
+  Relevant memories are recalled per question instead of the whole list, so
+  answers stay fast. Pin any detail forever with ★, say "yaad rakho ..." to
+  teach it instantly, ask "mere project ke baare mein kya yaad hai?" to recall,
+  and "bhool jao ..." to forget. Earlier conversation is summarised on the
+  phone so long chats are not forgotten, without sending extra context.
 - **Clearer voice and app commands (v2.0.0)** — "band karo voice" now locks the
   voice (it used to unlock it), and app names match whole words only, so
   "headphone" no longer opens the Phone app.
@@ -135,7 +142,7 @@ powershell -ExecutionPolicy Bypass -File .\build_apk.ps1 `
   -Sdk "C:\Android\Sdk" -Jdk "C:\Program Files\Java\jdk-17"
 ```
 
-Output: `JarvisMobile.apk` in this folder. Version 2.0.0 (versionCode 10).
+Output: `JarvisMobile.apk` in this folder. Version 2.1.0 (versionCode 11).
 
 On the first build the script creates a local development keystore at
 `keystore/jarvis.keystore` with a random password saved in

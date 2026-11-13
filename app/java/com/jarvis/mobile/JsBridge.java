@@ -855,7 +855,7 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
 
     @JavascriptInterface
     public String version() {
-        return "2.0.0";
+        return "2.1.0";
     }
 
     @JavascriptInterface
