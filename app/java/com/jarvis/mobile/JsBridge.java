@@ -735,8 +735,9 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
                             final String headersJson, final String body, final int timeoutMs) {
         final String id = requestId == null ? "" : requestId;
         final String verb = method == null ? "GET" : method.trim().toUpperCase(Locale.US);
-        if (!verb.equals("GET") && !verb.equals("POST")) {
-            callJs("window.__jarvisHttpRaw(" + q(id) + ",0," + q("Only GET and POST are allowed") + ")");
+        if (!verb.equals("GET") && !verb.equals("POST") && !verb.equals("PUT") &&
+                !verb.equals("PATCH") && !verb.equals("DELETE")) {
+            callJs("window.__jarvisHttpRaw(" + q(id) + ",0," + q("Only GET, POST, PUT, PATCH and DELETE are allowed") + ")");
             return;
         }
         URL target;
@@ -787,7 +788,7 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
                     }
                 } catch (Exception ignored) { }
 
-                if (verb.equals("POST")) {
+                if (!verb.equals("GET")) {
                     byte[] data = (body == null ? "" : body).getBytes(StandardCharsets.UTF_8);
                     conn.setDoOutput(true);
                     conn.setFixedLengthStreamingMode(data.length);
@@ -855,7 +856,7 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
 
     @JavascriptInterface
     public String version() {
-        return "2.1.0";
+        return "2.2.0";
     }
 
     @JavascriptInterface
@@ -905,6 +906,38 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
             ClipboardManager cm = (ClipboardManager) activity.getSystemService(Context.CLIPBOARD_SERVICE);
             if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("Jarvis", text == null ? "" : text));
         } catch (Exception ignored) { }
+    }
+
+    /** Dictation: append text to the field that currently has focus. */
+    @JavascriptInterface
+    public String insertText(String text) {
+        String safe = text == null ? "" : text;
+        try {
+            if (JarvisAccessibilityService.appendText(safe)) {
+                return "{\"ok\":true,\"mode\":\"typed\"}";
+            }
+        } catch (Exception ignored) { }
+        try {
+            ClipboardManager cm = (ClipboardManager) activity.getSystemService(Context.CLIPBOARD_SERVICE);
+            if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("Jarvis", safe));
+        } catch (Exception ignored) { }
+        return "{\"ok\":false,\"mode\":\"clipboard\"}";
+    }
+
+    /** Dictation edit: replace the whole focused field with the corrected buffer. */
+    @JavascriptInterface
+    public String replaceText(String text) {
+        String safe = text == null ? "" : text;
+        try {
+            if (JarvisAccessibilityService.setText(safe)) {
+                return "{\"ok\":true,\"mode\":\"replaced\"}";
+            }
+        } catch (Exception ignored) { }
+        try {
+            ClipboardManager cm = (ClipboardManager) activity.getSystemService(Context.CLIPBOARD_SERVICE);
+            if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("Jarvis", safe));
+        } catch (Exception ignored) { }
+        return "{\"ok\":false,\"mode\":\"clipboard\"}";
     }
 
     @JavascriptInterface

@@ -30,6 +30,11 @@ APK with the Android SDK command-line tools.
   teach it instantly, ask "mere project ke baare mein kya yaad hai?" to recall,
   and "bhool jao ..." to forget. Earlier conversation is summarised on the
   phone so long chats are not forgotten, without sending extra context.
+- **Assistant 2.2 (v2.2.0)** — personality profiles, writing-voice learning,
+  local calendar with real phone-calendar insert, scheduled routines, work
+  tools (GitHub, Slack, Notion, Linear, Jira), remote MCP servers, page reading
+  and summarising, and global dictation with spoken edits. See
+  [docs/ASSISTANT.md](docs/ASSISTANT.md) for setup and honest limits.
 - **Clearer voice and app commands (v2.0.0)** — "band karo voice" now locks the
   voice (it used to unlock it), and app names match whole words only, so
   "headphone" no longer opens the Phone app.
@@ -84,6 +89,35 @@ asks you to tap Install.
 
 The service never reads passwords. It only looks at visible text/buttons while
 performing a task. Turn it off any time in Android Accessibility settings.
+
+## Assistant 2.2 (personality, calendar, routines, work, MCP, dictation)
+
+Open **Settings > ASSISTANT 2.2** for the new panels. Everything here is
+optional and stores its data in this app's local storage on the phone.
+
+- **Personality** — pick Jarvis, Professional, Friendly, Concise, Mentor,
+  Creative, or write a custom instruction. Paste a paragraph you wrote and tap
+  **Learn my voice** so drafts match your tone; feedback notes are applied to
+  later drafts.
+- **Calendar** — say *"kal 3 baje Ali se meeting"* or *"meeting tomorrow 5 pm"*.
+  Events are saved locally and can be copied as `.ics`. Turn on **Phone
+  calendar** to open the standard Android event screen (Android's own Save
+  button finishes it; Jarvis never writes the calendar database silently).
+- **Routines** — *"routine add 07:30: news sunao"*. Routines run while Jarvis is
+  open or its foreground service is alive. Android may kill the process, so
+  they are not guaranteed after the app is force-stopped.
+- **Work tools** — GitHub issues/PRs, Slack read/summarise/post, Notion
+  search/read/append, Linear and Jira. Add your own token in **Work tools**;
+  tokens stay in local storage. Every write asks you to say **"confirm"** first.
+- **MCP** — Jarvis Mobile is an MCP *client* over streamable HTTP. Phones cannot
+  host a local stdio MCP server for other apps, and servers that require an
+  `mcp-session-id` header may not work with the current bridge.
+- **Page read / summarise** — *"read this page"* or *"summarize this page"* reads
+  the visible screen through Phone automation.
+- **Dictation** — *"start dictation"*, then speak; *"stop dictation"* ends it.
+  Spoken edits: *"scratch that"*, *"delete last word"*, *"new paragraph"*,
+  *"comma"*, *"capitalize that"*. With Phone automation on, text is typed into
+  the focused field; otherwise it goes to the clipboard.
 
 ## Smart home
 
@@ -142,7 +176,7 @@ powershell -ExecutionPolicy Bypass -File .\build_apk.ps1 `
   -Sdk "C:\Android\Sdk" -Jdk "C:\Program Files\Java\jdk-17"
 ```
 
-Output: `JarvisMobile.apk` in this folder. Version 2.1.0 (versionCode 11).
+Output: `JarvisMobile.apk` in this folder. Version 2.2.0 (versionCode 12).
 
 On the first build the script creates a local development keystore at
 `keystore/jarvis.keystore` with a random password saved in
@@ -187,6 +221,9 @@ The package name is `com.jarvis.mobile`.
 - Smart-home state and an optional Home Assistant token stay in that local
   storage; the token is sent only to the Home Assistant URL you enter.
 - Notification Access is optional and used only for Gmail summaries.
+- Work-tool tokens, calendar events, routines, personality samples and MCP
+  server settings stay in the WebView's local storage. Tokens are sent only to
+  the service you configured.
 - The accessibility service runs only while a Jarvis automation task is active.
 - This repository contains no API keys, keystores, logs, or personal data.
 

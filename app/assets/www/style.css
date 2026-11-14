@@ -767,3 +767,28 @@ body[data-state="speaking"] .state-label { color: #9ff6ff; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .001s !important; animation-iteration-count: 1 !important; }
 }
+
+/* assistant 2.2 sheets */
+.mini-text {
+  width: 100%;
+  margin-top: 10px;
+  border-radius: 11px;
+  border: 1px solid var(--line-soft);
+  background: rgba(5, 12, 19, 0.8);
+  color: #cfeeff;
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.45;
+  font-family: inherit;
+  outline: none;
+  resize: vertical;
+}
+.mini-text:focus { border-color: rgba(56, 240, 255, .4); }
+.hint.pre { white-space: pre-line; }
+#workOut, #mcpOut, #workState, #mcpState, #personaState {
+  margin-top: 10px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: #bfe8f5;
+}
+

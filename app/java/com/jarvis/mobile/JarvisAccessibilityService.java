@@ -191,6 +191,37 @@ public class JarvisAccessibilityService extends AccessibilityService {
         return ok;
     }
 
+    /** Appends text to the focused editable field instead of replacing it. */
+    public static boolean appendText(String text) {
+        JarvisAccessibilityService svc = instance;
+        if (svc == null || text == null) return false;
+        AccessibilityNodeInfo root = svc.safeRoot();
+        if (root == null) return false;
+
+        AccessibilityNodeInfo target = svc.findEditable(root, true);
+        if (target == null) target = svc.findEditable(root, false);
+        if (target == null) return false;
+
+        CharSequence current = target.getText();
+        String merged = (current == null ? "" : current.toString()) + text;
+        Bundle args = new Bundle();
+        args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, merged);
+        boolean ok = target.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
+        if (!ok) {
+            try {
+                android.content.ClipboardManager cm = (android.content.ClipboardManager)
+                        svc.getSystemService(Context.CLIPBOARD_SERVICE);
+                if (cm != null) {
+                    cm.setPrimaryClip(android.content.ClipData.newPlainText("Jarvis", merged));
+                    target.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
+                    target.performAction(AccessibilityNodeInfo.ACTION_PASTE);
+                    ok = true;
+                }
+            } catch (Exception ignored) { }
+        }
+        return ok;
+    }
+
     /** back / home / recents / notifications / quick_settings / lock / screenshot */
     public static boolean performAction(String action) {
         JarvisAccessibilityService svc = instance;

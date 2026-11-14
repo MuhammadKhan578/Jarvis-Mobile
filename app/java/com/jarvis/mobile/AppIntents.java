@@ -17,6 +17,7 @@ import android.os.Build;
 import android.os.Environment;
 import android.os.StatFs;
 import android.provider.AlarmClock;
+import android.provider.CalendarContract;
 import android.provider.MediaStore;
 import android.provider.Settings;
 
@@ -92,6 +93,7 @@ public final class AppIntents {
                 case "open_inbox": return openGmail(context);
                 case "set_alarm": return alarm(context, args.optInt("hour", 7), args.optInt("minute", 0), args.optString("label", "Jarvis alarm"));
                 case "set_timer": return timer(context, args.optInt("seconds", 300), args.optString("label", "Jarvis timer"));
+                case "calendar_add": return calendarAdd(context, args);
                 case "navigate": return navigate(context, args.optString("place", ""));
                 case "web_search": return webSearch(context, args.optString("query", ""));
                 case "device_status": return deviceStatus(context);
@@ -402,6 +404,36 @@ public final class AppIntents {
         i.putExtra(AlarmClock.EXTRA_SKIP_UI, false);
         boolean ok = start(c, i);
         return res(ok, ok ? "Timer tayyar hai; start confirm karein." : "Timer app nahi mila.", true, null);
+    }
+
+    /**
+     * Opens the standard phone calendar on a pre-filled event (ACTION_INSERT).
+     * Android shows its own Save button, so no calendar permission is needed
+     * and Jarvis never writes the calendar database silently.
+     */
+    private static String calendarAdd(Context c, JSONObject args) {
+        try {
+            String title = args.optString("title", "Jarvis event");
+            long begin = args.optLong("begin_ms", 0L);
+            if (begin <= 0L) return res(false, "Event ka waqt nahi mila.", false, null);
+            long end = args.optLong("end_ms", begin + 30L * 60L * 1000L);
+            if (end <= begin) end = begin + 30L * 60L * 1000L;
+            Intent i = new Intent(Intent.ACTION_INSERT);
+            i.setData(CalendarContract.Events.CONTENT_URI);
+            i.putExtra(CalendarContract.EXTRA_EVENT_BEGIN_TIME, begin);
+            i.putExtra(CalendarContract.EXTRA_EVENT_END_TIME, end);
+            i.putExtra(CalendarContract.Events.TITLE, title);
+            i.putExtra(CalendarContract.Events.DESCRIPTION, args.optString("notes", ""));
+            i.putExtra(CalendarContract.Events.EVENT_LOCATION, args.optString("location", ""));
+            boolean ok = start(c, i);
+            JSONObject data = new JSONObject();
+            data.put("begin_ms", begin);
+            data.put("end_ms", end);
+            return res(ok, ok ? "Phone calendar khul gaya — wahan Save dabaiye." :
+                    "Phone calendar app nahi mili.", !ok, data);
+        } catch (Exception e) {
+            return res(false, "Calendar insert fail: " + e.getMessage(), false, null);
+        }
     }
 
     private static String navigate(Context c, String place) {

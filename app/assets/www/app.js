@@ -14,7 +14,12 @@ const LS = {
   history: 'jv.history',
   // Last model that answered successfully. Trying it first avoids a wasted
   // round trip when the newest model is unavailable on the user's key.
-  goodModel: 'jv.goodModel'
+  goodModel: 'jv.goodModel',
+  persona: 'jv.persona',
+  calendar: 'jv.calendar',
+  routines: 'jv.routines',
+  workspace: 'jv.workspace',
+  mcp: 'jv.mcp'
 };
 
 function loadJSON(key, fallback) {
@@ -121,13 +126,15 @@ const Native = window.Android || {
   },
   executeTool: () => JSON.stringify({ ok: false, message: 'Native tools available nahi hain.' }),
   getStatus: () => JSON.stringify({ ok: true, data: { online: navigator.onLine, battery: -1, network: 'unknown' } }),
-  version: () => '2.1.0-web',
+  version: () => '2.2.0-web',
   deviceSummary: () => 'Browser',
   toast: (m) => window.jarvisToast && window.jarvisToast(m),
   vibrate: () => { },
   keepAwake: () => { },
   finishApp: () => { },
   copyText: (t) => { try { navigator.clipboard.writeText(t); } catch (e) { } },
+  insertText: () => JSON.stringify({ ok: false, mode: 'clipboard', message: 'Browser fallback' }),
+  replaceText: () => JSON.stringify({ ok: false, mode: 'clipboard', message: 'Browser fallback' }),
   log: (m) => console.log('[Native]', m),
   openTtsSettings: () => { },
   setNeuralPrefs: () => { },
@@ -2073,6 +2080,81 @@ async function localCommand(text) {
   const low = text.toLowerCase().trim();
   const lang = detectLang(low);
 
+  // Dictation must be handled before the generic "stop" rule below, otherwise
+  // "stop dictation" would stop the whole assistant.
+  if (/^(?:please\s+)?(?:start|begin|shuru)\s+(?:the\s+)?dictation\b|^dictation\s+(?:start|on|chalu)\b|\bbol\s+kar\s+likho\b/.test(low)) {
+    const msg = dictationStart();
+    addSystemLine(msg);
+    toast(msg);
+    return true;
+  }
+  if (/^(?:stop|end|band)\s+(?:the\s+)?dictation\b|^dictation\s+(?:stop|off|band)\b/.test(low)) {
+    const msg = dictationStop('stopped');
+    respond(msg, msg);
+    return true;
+  }
+  if (/^(?:dictation)\s+(?:status|haal)\b/.test(low)) {
+    const msg = dictationStatusLine();
+    respond(msg, msg);
+    return true;
+  }
+
+  // Calendar, persona, routines, page reading and work-tool confirmation.
+  if (/^(?:what'?s|kya)\b.*\b(?:calendar|appointments?|meetings?)\b|^(?:my\s+)?calendar\b|^aaj\s+ka\s+schedule\b/.test(low)) {
+    const range = /\bweek\b|\bhafte\b|\bhaftey\b/.test(low) ? 'week' :
+      (/\btoday\b|\baaj\b/.test(low) ? 'today' : 'upcoming');
+    const msg = calOperation('list', { range: range });
+    respond(msg, msg);
+    return true;
+  }
+  if (/\b(?:personality|persona|writing style)\b/.test(low) &&
+      /\b(?:show|status|batao|dikhao|kya|what|settings)\b/.test(low)) {
+    const msg = personaOperation('show');
+    respond(msg, msg);
+    return true;
+  }
+  if (/^(?:routine|routines)\b/.test(low)) {
+    const add = low.match(/^(?:routine|routines)\s+(?:add|lagao|banao)\s+(\d{1,2}:\d{2})[:\s-]+(.+)$/);
+    let msg;
+    if (add) msg = routineOperation('add', { time: add[1], task: add[2] });
+    else {
+      const del = low.match(/^(?:routine|routines)\s+(?:delete|hatao|remove)\s+(.+)$/);
+      msg = del ? routineOperation('delete', { query: del[1] }) : routineOperation('list', {});
+    }
+    respond(msg, msg);
+    return true;
+  }
+  if (/^(?:read|padho)\s+(?:this\s+)?(?:page|screen)\b|^page\s+(?:read|padho)\b|^screen\s+(?:read|padho)\b/.test(low)) {
+    const r = await pageRead();
+    respond(r.message, r.message);
+    return true;
+  }
+  if (/^(?:summari[sz]e|summary)\s+(?:this\s+)?(?:page|screen)\b|^page\s+summari[sz]e\b/.test(low)) {
+    try {
+      const r = await summarizePage('');
+      respond(r.message, r.message);
+    } catch (e) {
+      respond('Summary nahi ban saki: ' + (e && e.message || e), LINES.generic.urdu);
+    }
+    return true;
+  }
+  if (/^(?:confirm|confirmed|haan|han|yes|kar do|theek hai|ok)$/.test(low) && wsPending) {
+    const job = wsPending;
+    wsPending = null;
+    try {
+      const r = await job.run();
+      respond(r.message || (r.ok ? 'Done, sir.' : 'Nahi hua, sir.'), r.message || LINES.generic.urdu);
+    } catch (e) {
+      respond('Write fail hui: ' + (e && e.message || e), LINES.generic.urdu);
+    }
+    return true;
+  }
+  if (/^(?:cancel|nahi|no|rehne do)$/.test(low) && wsPending) {
+    wsPending = null;
+    respond('Cancel kar diya, sir.', 'کینسل کر دیا، سر۔');
+    return true;
+  }
+
   if (/^(stop|ruk jao|ruk|chup raho|chup|band karo voice)$/.test(low) ||
       /^(stop|ruk|chup)/.test(low) && text.length < 24) {
     stopEverything();
@@ -2347,6 +2429,1058 @@ async function localCommand(text) {
 
   if (tryLocalOpen(low)) return true;
   return false;
+}
+
+/* ========================================================== ASSISTANT 2.2 */
+/* Personality, local calendar + phone calendar, routines, work tools (GitHub,
+   Slack, Notion, Linear, Jira), remote MCP servers, page reading and global
+   dictation. Tokens and data stay in this app's localStorage; nothing is
+   uploaded except the API call you asked for. */
+
+/* --------------------------------------------------------------- persona */
+const PERSONA_STYLES = {
+  jarvis: 'Classic J.A.R.V.I.S.: calm, precise, quietly witty, calls the user "sir". Short spoken answers, dry humour only when it fits.',
+  professional: 'Polished professional assistant: formal, structured, no slang, no jokes. Clear recommendations and exact next steps.',
+  friendly: 'Warm and friendly companion: casual, encouraging, still concise. Speak like a helpful friend.',
+  concise: 'Ultra concise: answer in as few words as possible. One sentence for actions, two for questions.',
+  mentor: 'Patient mentor: explain the reasoning briefly, then give the single best next step.',
+  creative: 'Creative partner: vivid ideas, playful wording, but still practical and honest.',
+  custom: 'Follow the user\'s custom personality instructions exactly.'
+};
+
+function personaGet() {
+  const raw = loadJSON(LS.persona, {});
+  const p = (raw && typeof raw === 'object') ? raw : {};
+  return {
+    style: PERSONA_STYLES[p.style] ? p.style : 'jarvis',
+    custom: memClean(p.custom || '').slice(0, 1200),
+    samples: (Array.isArray(p.samples) ? p.samples : []).map(s => memClean(s).slice(0, 1500)).filter(Boolean).slice(-5),
+    feedback: (Array.isArray(p.feedback) ? p.feedback : []).map(s => memClean(s).slice(0, 300)).filter(Boolean).slice(-20)
+  };
+}
+function personaSave(p) {
+  saveJSON(LS.persona, {
+    style: p.style || 'jarvis',
+    custom: memClean(p.custom || '').slice(0, 1200),
+    samples: (p.samples || []).slice(-5),
+    feedback: (p.feedback || []).slice(-20)
+  });
+}
+function personaPromptBlock() {
+  const p = personaGet();
+  const lines = ['PERSONALITY: ' + (PERSONA_STYLES[p.style] || PERSONA_STYLES.jarvis)];
+  if (p.custom) lines.push('USER CUSTOM PERSONALITY: ' + p.custom);
+  if (p.feedback.length) lines.push('WRITING FEEDBACK: ' + p.feedback.slice(-6).join(' | '));
+  if (p.samples.length) {
+    const sample = p.samples[p.samples.length - 1];
+    lines.push('USER WRITING VOICE SAMPLE (match tone, do not copy facts): ' + sample.slice(0, 700));
+  }
+  return lines.join('\n');
+}
+function personaOperation(action, args) {
+  const a = String(action || 'show').toLowerCase();
+  const p = personaGet();
+  if (a === 'show' || a === 'status') {
+    const custom = p.custom ? ' | custom: ' + p.custom.slice(0, 80) : '';
+    return 'Personality: ' + p.style + custom + ' | samples: ' + p.samples.length +
+      ' | feedback notes: ' + p.feedback.length;
+  }
+  if (a === 'set') {
+    const style = String((args && args.style) || '').toLowerCase();
+    if (!PERSONA_STYLES[style]) return 'Choose one of: ' + Object.keys(PERSONA_STYLES).join(', ') + '.';
+    p.style = style;
+    personaSave(p);
+    return 'Personality set to ' + style + '.';
+  }
+  if (a === 'custom') {
+    p.custom = memClean((args && (args.text || args.custom)) || '');
+    if (p.custom) p.style = 'custom';
+    personaSave(p);
+    return p.custom ? 'Custom personality saved.' : 'Custom personality cleared.';
+  }
+  if (a === 'learn') {
+    const text = memClean((args && (args.text || args.sample)) || '');
+    if (text.length < 20) return 'Give me a longer writing sample (at least a sentence or two).';
+    p.samples.push(text.slice(0, 1500));
+    p.samples = p.samples.slice(-5);
+    personaSave(p);
+    return 'Writing voice learned. I will match that tone in future drafts.';
+  }
+  if (a === 'feedback') {
+    const text = memClean((args && (args.text || args.feedback)) || '');
+    if (!text) return 'What should I change about my writing?';
+    p.feedback.push(text.slice(0, 300));
+    p.feedback = p.feedback.slice(-20);
+    personaSave(p);
+    return 'Noted. I will apply that feedback to future drafts.';
+  }
+  if (a === 'reset') {
+    personaSave({ style: 'jarvis', custom: '', samples: [], feedback: [] });
+    return 'Personality and writing voice reset to the classic Jarvis style.';
+  }
+  return 'Persona action not recognised. Use show, set, custom, learn, feedback or reset.';
+}
+function personaStyleLine() {
+  const p = personaGet();
+  return 'persona=' + p.style + ' | samples=' + p.samples.length + ' | feedback=' + p.feedback.length;
+}
+
+/* --------------------------------------------------------------- calendar */
+function calLoad() {
+  const raw = loadJSON(LS.calendar, []);
+  const out = [];
+  (Array.isArray(raw) ? raw : []).forEach(e => {
+    if (!e || !e.title || !e.start) return;
+    const t = new Date(e.start);
+    if (isNaN(t.getTime())) return;
+    out.push({
+      id: String(e.id || calId()),
+      title: memClean(e.title).slice(0, 160),
+      start: t.toISOString(),
+      duration: clamp(Number(e.duration) || 30, 5, 24 * 60),
+      location: memClean(e.location || '').slice(0, 160),
+      notes: memClean(e.notes || '').slice(0, 600),
+      attendees: memClean(e.attendees || '').slice(0, 300),
+      created: Number(e.created) || Date.now()
+    });
+  });
+  return out.sort((a, b) => new Date(a.start) - new Date(b.start));
+}
+function calSave(list) {
+  saveJSON(LS.calendar, (list || []).slice(-400));
+}
+function calId() {
+  return 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
+function calParseWhen(raw, base) {
+  const text = String(raw || '').toLowerCase().trim();
+  if (!text) return null;
+  const now = base instanceof Date ? base : new Date();
+  let d = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  let explicitDate = false;
+  let md;
+  if ((md = text.match(/\b(\d{4})-(\d{1,2})-(\d{1,2})\b/))) {
+    d = new Date(+md[1], +md[2] - 1, +md[3]); explicitDate = true;
+  } else if ((md = text.match(/\b(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})\b/))) {
+    let y = +md[3]; if (y < 100) y += 2000;
+    d = new Date(y, +md[2] - 1, +md[1]); explicitDate = true;
+  } else if (/\btomorrow\b|\bkal\b/.test(text)) {
+    d.setDate(d.getDate() + 1); explicitDate = true;
+  } else if (/\bday after tomorrow\b|\bparson\b/.test(text)) {
+    d.setDate(d.getDate() + 2); explicitDate = true;
+  } else if (/\btoday\b|\baaj\b/.test(text)) {
+    explicitDate = true;
+  } else {
+    const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+    for (let i = 0; i < days.length; i++) {
+      if (new RegExp('\\b' + days[i] + '\\b').test(text)) {
+        const delta = (i - d.getDay() + 7) % 7 || 7;
+        d.setDate(d.getDate() + delta); explicitDate = true; break;
+      }
+    }
+  }
+  if ((md = text.match(/\bin\s+(\d{1,3})\s*(hours?|hrs?|minutes?|mins?)\b/))) {
+    const n = +md[1];
+    return new Date(now.getTime() + n * (/hour|hr/.test(md[2]) ? 3600000 : 60000));
+  }
+  let h = 9, m = 0, hasTime = false;
+  if ((md = text.match(/\b(\d{1,2})[:.](\d{2})\s*(am|pm)?\b/))) {
+    h = +md[1]; m = +md[2];
+    if (md[3] === 'pm' && h < 12) h += 12;
+    if (md[3] === 'am' && h === 12) h = 0;
+    hasTime = true;
+  } else if ((md = text.match(/\b(\d{1,2})\s*(am|pm)\b/))) {
+    h = +md[1];
+    if (md[2] === 'pm' && h < 12) h += 12;
+    if (md[2] === 'am' && h === 12) h = 0;
+    hasTime = true;
+  } else if (/\bnoon\b/.test(text)) {
+    h = 12; hasTime = true;
+  } else if ((md = text.match(/\b(\d{1,2})\s*(?:baje|bajay|o'?clock)\b/))) {
+    h = +md[1]; hasTime = true;
+    if (/\b(shaam|sham|evening|raat|night|dopahar|afternoon)\b/.test(text) && h < 12) h += 12;
+  }
+  if (!hasTime && !explicitDate) return null;
+  d.setHours(h, m, 0, 0);
+  if (!explicitDate && d.getTime() < now.getTime()) d.setDate(d.getDate() + 1);
+  return d;
+}
+function calFormat(iso) {
+  try {
+    return new Date(iso).toLocaleString('en-PK', {
+      weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit'
+    });
+  } catch (e) { return iso; }
+}
+function calList(range) {
+  const events = calLoad();
+  const now = new Date();
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  let end;
+  if (range === 'today') end = new Date(start.getTime() + 86400000);
+  else if (range === 'week') end = new Date(start.getTime() + 7 * 86400000);
+  else if (range === 'all') end = new Date(start.getTime() + 3650 * 86400000);
+  else end = new Date(start.getTime() + 30 * 86400000);
+  return events.filter(e => {
+    const t = new Date(e.start);
+    return t >= (range === 'all' ? new Date(0) : start) && t < end;
+  });
+}
+function calFind(query) {
+  const q = memClean(query || '').toLowerCase();
+  if (!q) return null;
+  const events = calLoad();
+  return events.find(e => e.id === query || e.id.toLowerCase() === q) ||
+    events.find(e => e.title.toLowerCase().includes(q));
+}
+function calIcs() {
+  const events = calLoad();
+  const pad = n => String(n).padStart(2, '0');
+  const stamp = d => d.getUTCFullYear() + pad(d.getUTCMonth() + 1) + pad(d.getUTCDate()) +
+    'T' + pad(d.getUTCHours()) + pad(d.getUTCMinutes()) + pad(d.getUTCSeconds()) + 'Z';
+  const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Jarvis Mobile//Calendar//EN', 'CALSCALE:GREGORIAN'];
+  events.forEach(e => {
+    const s = new Date(e.start);
+    const en = new Date(s.getTime() + (e.duration || 30) * 60000);
+    lines.push('BEGIN:VEVENT');
+    lines.push('UID:' + e.id + '@jarvis.mobile');
+    lines.push('DTSTAMP:' + stamp(new Date()));
+    lines.push('DTSTART:' + stamp(s));
+    lines.push('DTEND:' + stamp(en));
+    lines.push('SUMMARY:' + String(e.title).replace(/[\r\n]/g, ' '));
+    if (e.location) lines.push('LOCATION:' + e.location.replace(/[\r\n]/g, ' '));
+    if (e.notes) lines.push('DESCRIPTION:' + e.notes.replace(/[\r\n]/g, '\\n'));
+    lines.push('END:VEVENT');
+  });
+  lines.push('END:VCALENDAR');
+  return lines.join('\r\n');
+}
+function calInsertNative(ev) {
+  const start = new Date(ev.start);
+  const end = new Date(start.getTime() + (ev.duration || 30) * 60000);
+  const r = callTool('calendar_add', {
+    title: ev.title,
+    begin_ms: start.getTime(),
+    end_ms: end.getTime(),
+    location: ev.location || '',
+    notes: ev.notes || ''
+  });
+  return r;
+}
+function calOperation(action, args) {
+  const a = String(action || 'list').toLowerCase();
+  if (a === 'add' || a === 'create') {
+    const title = memClean((args && args.title) || '');
+    if (!title) return 'Event ka title bataiye.';
+    const when = (args && (args.when || args.start || args.time)) || title;
+    const start = calParseWhen(when);
+    if (!start) return 'Time samajh nahi aaya. Example: "tomorrow 5 pm", "kal 3 baje", "2026-11-14 09:30".';
+    const ev = {
+      id: calId(), title: title.replace(/\s+(?:tomorrow|today|kal|aaj)\b.*$/i, '').trim() || title,
+      start: start.toISOString(),
+      duration: clamp(Number(args && args.duration_minutes) || 30, 5, 720),
+      location: memClean((args && args.location) || ''),
+      notes: memClean((args && args.notes) || ''),
+      attendees: memClean((args && args.attendees) || ''),
+      created: Date.now()
+    };
+    const list = calLoad(); list.push(ev); calSave(list);
+    let extra = '';
+    if (args && args.insert_phone) {
+      const r = calInsertNative(ev);
+      extra = r && r.ok ? ' Phone calendar bhi khul gaya — wahan Save dabaiye.' : '';
+    }
+    renderCalendar();
+    return 'Event created: ' + ev.title + ' — ' + calFormat(ev.start) + ' (' + ev.duration + ' min).' + extra;
+  }
+  if (a === 'list' || a === 'read' || a === 'show') {
+    const range = String((args && (args.range || args.period)) || 'week').toLowerCase();
+    const events = calList(range);
+    if (!events.length) return 'No events in ' + range + ' range.';
+    return 'Calendar (' + range + '):\n' + events.slice(0, 15).map(e =>
+      '• ' + calFormat(e.start) + ' — ' + e.title + (e.location ? ' @ ' + e.location : '')).join('\n');
+  }
+  if (a === 'update' || a === 'reschedule') {
+    const ev = calFind(args && (args.query || args.id || args.title));
+    if (!ev) return 'Event nahi mila.';
+    const list = calLoad();
+    const item = list.find(x => x.id === ev.id);
+    if (args && (args.when || args.start)) {
+      const start = calParseWhen(args.when || args.start);
+      if (!start) return 'Naya time samajh nahi aaya.';
+      item.start = start.toISOString();
+    }
+    if (args && args.duration_minutes) item.duration = clamp(Number(args.duration_minutes), 5, 720);
+    if (args && args.location) item.location = memClean(args.location);
+    if (args && args.notes) item.notes = memClean(args.notes);
+    if (args && args.title) item.title = memClean(args.title).slice(0, 160);
+    calSave(list); renderCalendar();
+    return 'Event updated: ' + item.title + ' — ' + calFormat(item.start) + '.';
+  }
+  if (a === 'delete' || a === 'remove') {
+    const ev = calFind(args && (args.query || args.id || args.title));
+    if (!ev) return 'Event nahi mila.';
+    calSave(calLoad().filter(x => x.id !== ev.id));
+    renderCalendar();
+    return 'Deleted: ' + ev.title + '.';
+  }
+  if (a === 'insert') {
+    const ev = calFind(args && (args.query || args.id || args.title));
+    if (!ev) return 'Event nahi mila.';
+    const r = calInsertNative(ev);
+    return r.ok ? 'Phone calendar opened for ' + ev.title + ' — tap Save.' : (r.message || 'Phone calendar nahi khula.');
+  }
+  if (a === 'export') {
+    const ics = calIcs();
+    try { Native.copyText(ics); } catch (e) { }
+    return 'Calendar exported as .ics text and copied to the clipboard. Paste it into a file or share it to import.';
+  }
+  return 'Calendar action not recognised. Use add, list, update, delete, insert or export.';
+}
+function renderCalendar() {
+  const list = $('#calList');
+  if (!list) return;
+  list.textContent = '';
+  const events = calList(calUiRange === 'all' ? 'all' : calUiRange);
+  if (!events.length) {
+    const p = document.createElement('p');
+    p.className = 'hint';
+    p.textContent = 'Koi event nahi. Neeche title aur time likh kar Add dabaiye.';
+    list.appendChild(p);
+    return;
+  }
+  events.slice(0, 40).forEach(ev => {
+    const row = document.createElement('div');
+    row.className = 'memory-item';
+    const info = document.createElement('span');
+    const b = document.createElement('b');
+    b.className = 'memory-cat';
+    b.textContent = calFormat(ev.start);
+    info.appendChild(b);
+    info.appendChild(document.createTextNode(ev.title + (ev.location ? ' · ' + ev.location : '')));
+    const del = document.createElement('button');
+    del.className = 'memory-pin';
+    del.textContent = '✕';
+    del.title = 'Delete';
+    del.addEventListener('click', () => {
+      calSave(calLoad().filter(x => x.id !== ev.id));
+      renderCalendar();
+    });
+    row.appendChild(info);
+    row.appendChild(del);
+    list.appendChild(row);
+  });
+}
+
+/* ---------------------------------------------------------------- routines */
+function routineLoad() {
+  const raw = loadJSON(LS.routines, []);
+  const out = [];
+  (Array.isArray(raw) ? raw : []).forEach(r => {
+    if (!r || !r.time || !r.task) return;
+    const m = String(r.time).match(/^(\d{1,2}):(\d{2})$/);
+    if (!m) return;
+    out.push({
+      id: String(r.id || ('r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5))),
+      time: String(m[1]).padStart(2, '0') + ':' + m[2],
+      task: memClean(r.task).slice(0, 400),
+      days: Array.isArray(r.days) && r.days.length ? r.days.map(Number).filter(d => d >= 0 && d <= 6) : [0, 1, 2, 3, 4, 5, 6],
+      enabled: r.enabled !== false,
+      lastRun: String(r.lastRun || '')
+    });
+  });
+  return out;
+}
+function routineSave(list) { saveJSON(LS.routines, (list || []).slice(0, 50)); }
+function routineOperation(action, args) {
+  const a = String(action || 'list').toLowerCase();
+  const list = routineLoad();
+  if (a === 'list' || a === 'show') {
+    if (!list.length) return 'Koi routine nahi. Bolein "routine add 7:30 am: news sunao".';
+    return 'Routines:\n' + list.map(r => '• ' + r.time + ' — ' + r.task + (r.enabled ? '' : ' (off)')).join('\n');
+  }
+  if (a === 'add' || a === 'create') {
+    const time = String((args && args.time) || '').trim();
+    const task = memClean((args && (args.task || args.text)) || '');
+    if (!/^\d{1,2}:\d{2}$/.test(time) || !task) return 'Time HH:MM aur task dono chahiye. Example: 07:30, "news sunao".';
+    list.push({
+      id: 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
+      time, task, days: [0, 1, 2, 3, 4, 5, 6], enabled: true, lastRun: ''
+    });
+    routineSave(list); renderRoutines();
+    return 'Routine added: ' + time + ' — ' + task + '. It runs while Jarvis is open or its background service is alive.';
+  }
+  if (a === 'delete' || a === 'remove') {
+    const q = memClean((args && (args.query || args.time || args.task)) || '').toLowerCase();
+    const found = list.filter(r => r.id === q || r.time === q || r.task.toLowerCase().includes(q));
+    if (!found.length) return 'Routine nahi mili.';
+    const ids = new Set(found.map(r => r.id));
+    routineSave(list.filter(r => !ids.has(r.id))); renderRoutines();
+    return 'Routine deleted.';
+  }
+  if (a === 'toggle' || a === 'enable' || a === 'disable') {
+    const q = memClean((args && (args.query || args.id || args.time)) || '').toLowerCase();
+    const found = list.find(r => r.id === q || r.time === q || r.task.toLowerCase().includes(q));
+    if (!found) return 'Routine nahi mili.';
+    found.enabled = a === 'enable' ? true : (a === 'disable' ? false : !found.enabled);
+    routineSave(list); renderRoutines();
+    return 'Routine ' + (found.enabled ? 'on' : 'off') + ': ' + found.task;
+  }
+  return 'Routine action not recognised. Use list, add, delete or toggle.';
+}
+function routineCheck() {
+  if (busy || DICT.active || state === 'speaking' || state === 'thinking') return;
+  const now = new Date();
+  const today = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' +
+    String(now.getDate()).padStart(2, '0');
+  const hhmm = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
+  let changed = false;
+  const list = routineLoad();
+  list.forEach(r => {
+    const marker = today + ' ' + r.time;
+    if (!r.enabled || r.time !== hhmm || r.lastRun === marker) return;
+    if (r.days.indexOf(now.getDay()) < 0) return;
+    r.lastRun = marker;
+    changed = true;
+    addSystemLine('ROUTINE · ' + r.task);
+    handleCommand(r.task);
+  });
+  if (changed) routineSave(list);
+}
+function renderRoutines() {
+  const list = $('#routineList');
+  if (!list) return;
+  list.textContent = '';
+  const items = routineLoad();
+  if (!items.length) {
+    const p = document.createElement('p');
+    p.className = 'hint';
+    p.textContent = 'Koi routine nahi. Time aur task likh kar Add dabaiye.';
+    list.appendChild(p);
+    return;
+  }
+  items.forEach(r => {
+    const row = document.createElement('div');
+    row.className = 'memory-item' + (r.enabled ? '' : ' pinned');
+    const info = document.createElement('span');
+    const b = document.createElement('b');
+    b.className = 'memory-cat';
+    b.textContent = r.time + (r.enabled ? '' : ' · OFF');
+    info.appendChild(b);
+    info.appendChild(document.createTextNode(r.task));
+    const del = document.createElement('button');
+    del.className = 'memory-pin';
+    del.textContent = '✕';
+    del.title = 'Delete';
+    del.addEventListener('click', () => {
+      routineSave(routineLoad().filter(x => x.id !== r.id));
+      renderRoutines();
+    });
+    row.appendChild(info);
+    row.appendChild(del);
+    list.appendChild(row);
+  });
+}
+
+/* --------------------------------------------------------------- work tools */
+const WS_SERVICES = ['github', 'slack', 'notion', 'linear', 'jira'];
+function wsLoad() {
+  const raw = loadJSON(LS.workspace, {});
+  return (raw && typeof raw === 'object') ? raw : {};
+}
+function wsSave(cfg) { saveJSON(LS.workspace, cfg || {}); }
+function wsCfg(service) {
+  const cfg = wsLoad()[service];
+  return (cfg && typeof cfg === 'object') ? cfg : {};
+}
+function wsStatus() {
+  const cfg = wsLoad();
+  const lines = WS_SERVICES.map(s => {
+    const c = cfg[s] || {};
+    const ready = c.token ? 'configured' : 'not configured';
+    const extra = s === 'github' && c.repo ? ' (' + c.repo + ')' :
+      s === 'slack' && c.channel ? ' (#' + String(c.channel).replace(/^#/, '') + ')' :
+        s === 'jira' && c.url ? ' (' + c.url + ')' : '';
+    return '• ' + s + ': ' + ready + extra;
+  });
+  return 'Work tools:\n' + lines.join('\n') + '\nTokens stay in this app on this phone.';
+}
+let wsPending = null;
+function wsGuard(label, run) {
+  wsPending = { label: label, run: run };
+  return { ok: false, needs_user_action: true, message: label + ' Confirm karne ke liye "confirm" bolein.' };
+}
+function wsHeaders(service, extra) {
+  const c = wsCfg(service);
+  const h = Object.assign({ 'Accept': 'application/json' }, extra || {});
+  if (service === 'github') h['Authorization'] = 'Bearer ' + c.token;
+  else if (service === 'slack') h['Authorization'] = 'Bearer ' + c.token;
+  else if (service === 'notion') {
+    h['Authorization'] = 'Bearer ' + c.token;
+    h['Notion-Version'] = '2022-06-28';
+  } else if (service === 'linear') h['Authorization'] = c.token;
+  else if (service === 'jira') h['Authorization'] = 'Basic ' + btoa((c.email || '') + ':' + c.token);
+  return h;
+}
+async function wsCall(service, method, url, payload, extraHeaders) {
+  const c = wsCfg(service);
+  if (!c.token) return { ok: false, status: 0, body: service + ' token set nahi hai. Settings → Work tools.' };
+  const body = payload == null ? '' : JSON.stringify(payload);
+  const headers = wsHeaders(service, extraHeaders);
+  if (body) headers['Content-Type'] = 'application/json';
+  const r = await nativeHttpRequest(method, url, headers, body, 15000);
+  let data = null;
+  try { data = JSON.parse(r.body); } catch (e) { data = null; }
+  return { ok: r.ok, status: r.status, body: r.body, data: data };
+}
+function wsErr(service, r) {
+  let detail = '';
+  try {
+    if (r.data) {
+      detail = (r.data.message || (r.data.error && (r.data.error.message || r.data.error)) || JSON.stringify(r.data));
+    } else detail = String(r.body || '').slice(0, 200);
+  } catch (e) { detail = String(r.body || '').slice(0, 200); }
+  return service + ' error (' + r.status + '): ' + String(detail || 'unknown').slice(0, 240);
+}
+function wsGithubBase() {
+  const repo = String(wsCfg('github').repo || '').trim();
+  if (!repo || !/^[\w.-]+\/[\w.-]+$/.test(repo)) return null;
+  return 'https://api.github.com/repos/' + repo;
+}
+async function wsGithubList(kind) {
+  const base = wsGithubBase();
+  if (!base) return { ok: false, message: 'GitHub repo set nahi hai (owner/name).' };
+  const url = base + (kind === 'pr' || kind === 'prs' ? '/pulls?state=open&per_page=8' : '/issues?state=open&per_page=8');
+  const r = await wsCall('github', 'GET', url);
+  if (!r.ok || !Array.isArray(r.data)) return { ok: false, message: wsErr('github', r) };
+  const items = r.data.filter(x => !x.pull_request).slice(0, 8);
+  if (!items.length) return { ok: true, message: 'No open ' + (kind === 'pr' || kind === 'prs' ? 'pull requests' : 'issues') + ' in ' + wsCfg('github').repo + '.' };
+  return {
+    ok: true,
+    message: 'GitHub ' + (kind === 'pr' || kind === 'prs' ? 'PRs' : 'issues') + ':\n' +
+      items.map(x => '#' + x.number + ' ' + x.title + ' (' + (x.user && x.user.login || '?') + ')').join('\n')
+  };
+}
+async function wsGithubCreate(args) {
+  const base = wsGithubBase();
+  if (!base) return { ok: false, message: 'GitHub repo set nahi hai (owner/name).' };
+  const title = memClean((args && args.title) || '');
+  if (!title) return { ok: false, message: 'Issue ka title bataiye.' };
+  const r = await wsCall('github', 'POST', base + '/issues', { title: title, body: memClean(args.body || '') });
+  if (!r.ok || !r.data || !r.data.number) return { ok: false, message: wsErr('github', r) };
+  return { ok: true, message: 'GitHub issue #' + r.data.number + ' created: ' + title };
+}
+async function wsSlackHistory(args) {
+  const c = wsCfg('slack');
+  const channel = String((args && (args.channel || args.channel_id)) || c.channel || '').replace(/^#/, '').trim();
+  if (!channel) return { ok: false, message: 'Slack channel set nahi hai.' };
+  const r = await wsCall('slack', 'GET', 'https://slack.com/api/conversations.history?limit=20&channel=' + encodeURIComponent(channel));
+  if (!r.ok || !r.data || r.data.ok !== true) return { ok: false, message: wsErr('slack', r) };
+  const msgs = (r.data.messages || []).slice().reverse();
+  if (!msgs.length) return { ok: true, message: '#' + channel + ' mein koi message nahi mila.' };
+  return {
+    ok: true,
+    message: '#' + channel + ' latest:\n' + msgs.slice(-12).map(m =>
+      '• ' + (m.user || m.bot_id || 'someone') + ': ' + String(m.text || '').replace(/\s+/g, ' ').slice(0, 200)).join('\n')
+  };
+}
+async function wsSlackPost(args) {
+  const c = wsCfg('slack');
+  const channel = String((args && args.channel) || c.channel || '').replace(/^#/, '').trim();
+  const text = memClean((args && (args.text || args.body || args.message)) || '');
+  if (!channel || !text) return { ok: false, message: 'Slack channel aur message dono chahiye.' };
+  const r = await wsCall('slack', 'POST', 'https://slack.com/api/chat.postMessage', { channel: channel, text: text });
+  if (!r.ok || !r.data || r.data.ok !== true) return { ok: false, message: wsErr('slack', r) };
+  return { ok: true, message: 'Slack message sent to #' + channel + '.' };
+}
+function notionTitle(page) {
+  try {
+    const props = page.properties || {};
+    for (const k of Object.keys(props)) {
+      const p = props[k];
+      if (p && p.type === 'title' && Array.isArray(p.title) && p.title.length) {
+        return p.title.map(t => t.plain_text || '').join('').trim();
+      }
+    }
+    if (page.title && Array.isArray(page.title)) return page.title.map(t => t.plain_text || '').join('').trim();
+  } catch (e) { }
+  return '(untitled)';
+}
+async function wsNotionSearch(args) {
+  const query = memClean((args && (args.query || args.text)) || '');
+  const r = await wsCall('notion', 'POST', 'https://api.notion.com/v1/search', {
+    query: query, page_size: 8, sort: { direction: 'descending', timestamp: 'last_edited_time' }
+  });
+  if (!r.ok || !r.data || !Array.isArray(r.data.results)) return { ok: false, message: wsErr('notion', r) };
+  if (!r.data.results.length) return { ok: true, message: 'Notion mein kuch match nahi mila.' };
+  return {
+    ok: true,
+    message: 'Notion results:\n' + r.data.results.map((p, i) =>
+      (i + 1) + '. ' + notionTitle(p) + ' [' + p.object + ' ' + p.id.slice(0, 8) + ']').join('\n')
+  };
+}
+async function wsNotionRead(args) {
+  const id = String((args && (args.id || args.page_id || args.query)) || '').replace(/-/g, '');
+  if (!/^[0-9a-f]{32}$/i.test(id)) return { ok: false, message: 'Notion page id chahiye (search se mil jayega).' };
+  const clean = id.replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, '$1-$2-$3-$4-$5');
+  const r = await wsCall('notion', 'GET', 'https://api.notion.com/v1/blocks/' + clean + '/children?page_size=50');
+  if (!r.ok || !r.data || !Array.isArray(r.data.results)) return { ok: false, message: wsErr('notion', r) };
+  const lines = [];
+  r.data.results.forEach(b => {
+    const rich = b[b.type] && b[b.type].rich_text;
+    if (Array.isArray(rich)) {
+      const text = rich.map(t => t.plain_text || '').join('').trim();
+      if (text) lines.push('• ' + text);
+    }
+  });
+  return { ok: true, message: lines.length ? lines.slice(0, 30).join('\n') : 'Page khali lag raha hai.' };
+}
+async function wsNotionAppend(args) {
+  const id = String((args && (args.id || args.page_id)) || '').replace(/-/g, '');
+  const text = memClean((args && (args.text || args.body)) || '');
+  if (!/^[0-9a-f]{32}$/i.test(id) || !text) return { ok: false, message: 'Notion page id aur text dono chahiye.' };
+  const clean = id.replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, '$1-$2-$3-$4-$5');
+  const r = await wsCall('notion', 'PATCH', 'https://api.notion.com/v1/blocks/' + clean + '/children', {
+    children: [{ object: 'block', type: 'paragraph', paragraph: { rich_text: [{ type: 'text', text: { content: text } }] } }]
+  });
+  if (!r.ok) return { ok: false, message: wsErr('notion', r) };
+  return { ok: true, message: 'Note appended to Notion page.' };
+}
+async function wsLinear(args, create) {
+  const c = wsCfg('linear');
+  if (!c.token) return { ok: false, message: 'Linear token set nahi hai.' };
+  if (create) {
+    const title = memClean((args && args.title) || '');
+    const team = String((args && (args.team || args.project)) || c.project || '').trim();
+    if (!title || !team) return { ok: false, message: 'Linear issue title aur team id chahiye.' };
+    const q = 'mutation($team:String!,$title:String!,$desc:String){issueCreate(input:{teamId:$team,title:$title,description:$desc}){success issue{identifier title url}}}';
+    const r = await wsCall('linear', 'POST', 'https://api.linear.app/graphql', {
+      query: q, variables: { team: team, title: title, desc: memClean(args.body || '') }
+    });
+    if (!r.ok || !r.data || r.data.errors) return { ok: false, message: wsErr('linear', r) };
+    const issue = r.data.data && r.data.data.issueCreate && r.data.data.issueCreate.issue;
+    return issue ? { ok: true, message: 'Linear issue ' + issue.identifier + ' created: ' + issue.title } :
+      { ok: false, message: 'Linear ne issue nahi banaya.' };
+  }
+  const q = 'query{viewer{assignedIssues(first:8){nodes{identifier title state{name} url}}}}';
+  const r = await wsCall('linear', 'POST', 'https://api.linear.app/graphql', { query: q });
+  if (!r.ok || !r.data || r.data.errors) return { ok: false, message: wsErr('linear', r) };
+  const nodes = (r.data.data && r.data.data.viewer && r.data.data.viewer.assignedIssues.nodes) || [];
+  if (!nodes.length) return { ok: true, message: 'Linear mein koi assigned issue nahi.' };
+  return { ok: true, message: 'Linear issues:\n' + nodes.map(i => '• ' + i.identifier + ' ' + i.title + ' [' + (i.state && i.state.name || '?') + ']').join('\n') };
+}
+function jiraBase() {
+  const c = wsCfg('jira');
+  return String(c.url || '').replace(/\/+$/, '');
+}
+async function wsJira(args, create) {
+  const c = wsCfg('jira');
+  const base = jiraBase();
+  if (!c.token || !base) return { ok: false, message: 'Jira URL, email aur token set karein.' };
+  if (create) {
+    const title = memClean((args && args.title) || '');
+    const project = String((args && args.project) || c.project || '').trim();
+    if (!title || !project) return { ok: false, message: 'Jira issue title aur project key chahiye.' };
+    const r = await wsCall('jira', 'POST', base + '/rest/api/2/issue', {
+      fields: { project: { key: project }, summary: title, description: memClean(args.body || ''), issuetype: { name: 'Task' } }
+    });
+    if (!r.ok || !r.data || !r.data.key) return { ok: false, message: wsErr('jira', r) };
+    return { ok: true, message: 'Jira issue ' + r.data.key + ' created: ' + title };
+  }
+  const jql = encodeURIComponent('assignee = currentUser() ORDER BY updated DESC');
+  const r = await wsCall('jira', 'GET', base + '/rest/api/2/search?maxResults=8&fields=summary,status&jql=' + jql);
+  if (!r.ok || !r.data || !Array.isArray(r.data.issues)) return { ok: false, message: wsErr('jira', r) };
+  if (!r.data.issues.length) return { ok: true, message: 'Jira mein koi assigned issue nahi.' };
+  return { ok: true, message: 'Jira issues:\n' + r.data.issues.map(i => '• ' + i.key + ' ' + i.fields.summary + ' [' + (i.fields.status && i.fields.status.name || '?') + ']').join('\n') };
+}
+function wsConfigure(args) {
+  const service = String((args && args.service) || '').toLowerCase();
+  if (WS_SERVICES.indexOf(service) < 0) return 'Choose a service: ' + WS_SERVICES.join(', ') + '.';
+  const cfg = wsLoad();
+  const old = cfg[service] || {};
+  const next = Object.assign({}, old);
+  const token = String((args && args.token) || '').trim();
+  if (token) next.token = token;
+  if (args && args.repo) next.repo = memClean(args.repo);
+  if (args && args.channel) next.channel = memClean(args.channel).replace(/^#/, '');
+  if (args && args.project) next.project = memClean(args.project);
+  if (args && args.url) next.url = memClean(args.url).replace(/\/+$/, '');
+  if (args && args.email) next.email = memClean(args.email);
+  if (!next.token) return service + ' token chahiye.';
+  cfg[service] = next;
+  wsSave(cfg);
+  renderWork();
+  return service + ' configured. Token sirf is phone par save hua.';
+}
+async function workspaceOperation(action, args) {
+  const a = String(action || 'status').toLowerCase();
+  const service = String((args && args.service) || '').toLowerCase();
+  if (a === 'status' || a === 'show') return { ok: true, message: wsStatus() };
+  if (a === 'configure') return { ok: true, message: wsConfigure(args || {}) };
+  if (a === 'list' || a === 'read' || a === 'summarize') {
+    if (service === 'github') {
+      const r = await wsGithubList((args && args.kind) || 'issue');
+      if (a === 'summarize' && r.ok) return { ok: true, message: await llmText('Summarize these work items in 3 short sentences:\n' + r.message) };
+      return r;
+    }
+    if (service === 'slack') {
+      const r = await wsSlackHistory(args || {});
+      if (a === 'summarize' && r.ok) return { ok: true, message: await llmText('Summarize this Slack conversation in 3 short sentences, with any action items:\n' + r.message) };
+      return r;
+    }
+    if (service === 'notion') {
+      if (a === 'read') return wsNotionRead(args || {});
+      const r = await wsNotionSearch(args || {});
+      if (a === 'summarize' && r.ok) return { ok: true, message: await llmText('Summarize these Notion search results in 2 short sentences:\n' + r.message) };
+      return r;
+    }
+    if (service === 'linear') return wsLinear(args || {}, false);
+    if (service === 'jira') return wsJira(args || {}, false);
+    return { ok: false, message: 'Service choose karein: ' + WS_SERVICES.join(', ') + '.' };
+  }
+  if (a === 'create' || a === 'post' || a === 'comment' || a === 'append') {
+    const label = service + ' ' + a + ': ' + memClean((args && (args.title || args.text || args.message)) || '');
+    if (!(args && args.confirmed)) {
+      return wsGuard(label, async () => {
+        if (service === 'github') return wsGithubCreate(args || {});
+        if (service === 'slack') return wsSlackPost(args || {});
+        if (service === 'notion') return wsNotionAppend(args || {});
+        if (service === 'linear') return wsLinear(args || {}, true);
+        if (service === 'jira') return wsJira(args || {}, true);
+        return { ok: false, message: 'Service choose karein.' };
+      });
+    }
+    if (service === 'github') return wsGithubCreate(args || {});
+    if (service === 'slack') return wsSlackPost(args || {});
+    if (service === 'notion') return wsNotionAppend(args || {});
+    if (service === 'linear') return wsLinear(args || {}, true);
+    if (service === 'jira') return wsJira(args || {}, true);
+  }
+  return { ok: false, message: 'Workspace action not recognised. Use status, list, summarize, create, post, comment or append.' };
+}
+function renderWork() {
+  const el = $('#workState');
+  if (el) el.textContent = wsStatus();
+}
+
+/* -------------------------------------------------------------------- MCP */
+function mcpLoad() {
+  const raw = loadJSON(LS.mcp, {});
+  return (raw && raw.servers && typeof raw.servers === 'object') ? raw : { servers: {} };
+}
+function mcpSave(cfg) { saveJSON(LS.mcp, cfg); }
+let mcpSeq = 0;
+function mcpParse(text) {
+  const t = String(text || '').trim();
+  if (!t) return null;
+  if (t[0] === '{' || t[0] === '[') {
+    try { return JSON.parse(t); } catch (e) { }
+  }
+  let last = null;
+  t.split(/\r?\n/).forEach(line => {
+    const m = line.match(/^data:\s*(.*)$/);
+    if (!m) return;
+    const s = m[1].trim();
+    if (!s || s === '[DONE]') return;
+    try { last = JSON.parse(s); } catch (e) { }
+  });
+  return last;
+}
+async function mcpRpc(name, method, params) {
+  const cfg = mcpLoad();
+  const server = cfg.servers[name];
+  if (!server || !server.url) return { ok: false, message: 'MCP server "' + name + '" set nahi hai.' };
+  const headers = {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json, text/event-stream'
+  };
+  if (server.token) headers['Authorization'] = 'Bearer ' + server.token;
+  const r = await nativeHttpRequest('POST', server.url, headers, JSON.stringify({
+    jsonrpc: '2.0', id: ++mcpSeq, method: method, params: params || {}
+  }), 15000);
+  const data = mcpParse(r.body);
+  if (!r.ok) {
+    const hint = r.status === 400 || r.status === 404
+      ? ' This server may need an mcp-session-id header; the phone bridge cannot read that header yet.'
+      : '';
+    return { ok: false, message: 'MCP ' + name + ' error (' + r.status + '): ' + String(r.body || '').slice(0, 200) + hint };
+  }
+  if (!data) return { ok: false, message: 'MCP ' + name + ' ne koi JSON jawab nahi diya.' };
+  if (data.error) return { ok: false, message: 'MCP error: ' + (data.error.message || JSON.stringify(data.error)).slice(0, 240) };
+  return { ok: true, data: data.result };
+}
+async function mcpInitialize(name) {
+  return mcpRpc(name, 'initialize', {
+    protocolVersion: '2024-11-05',
+    capabilities: {},
+    clientInfo: { name: 'jarvis-mobile', version: '2.2.0' }
+  });
+}
+async function mcpListTools(name) {
+  const init = await mcpInitialize(name);
+  if (!init.ok) return init;
+  const r = await mcpRpc(name, 'tools/list', {});
+  if (!r.ok) return r;
+  const tools = (r.data && r.data.tools) || [];
+  if (!tools.length) return { ok: true, message: 'MCP server "' + name + '" ne koi tool nahi diya.' };
+  return {
+    ok: true,
+    message: 'MCP tools on ' + name + ':\n' + tools.map(t => '• ' + t.name + ' — ' + String(t.description || '').slice(0, 90)).join('\n')
+  };
+}
+async function mcpCall(name, tool, argsText) {
+  if (!tool) return { ok: false, message: 'Tool ka naam chahiye.' };
+  let args = {};
+  if (argsText && typeof argsText === 'object') args = argsText;
+  else if (argsText) {
+    try { args = JSON.parse(String(argsText)); }
+    catch (e) { return { ok: false, message: 'Arguments valid JSON hone chahiye.' }; }
+  }
+  const init = await mcpInitialize(name);
+  if (!init.ok) return init;
+  const r = await mcpRpc(name, 'tools/call', { name: tool, arguments: args });
+  if (!r.ok) return r;
+  const content = (r.data && r.data.content) || [];
+  const text = content.map(c => c && (c.text || (c.type === 'resource' ? JSON.stringify(c.resource) : ''))).filter(Boolean).join('\n');
+  return { ok: true, message: text ? text.slice(0, 2000) : 'Tool chal gaya, koi text jawab nahi.' };
+}
+function mcpConfig() {
+  const cfg = mcpLoad();
+  return 'MCP servers configured on this phone:\n' + (Object.keys(cfg.servers).length
+    ? Object.keys(cfg.servers).map(k => '• ' + k + ' → ' + cfg.servers[k].url).join('\n')
+    : '(none)') +
+    '\n\nNote: phones cannot host a local stdio MCP server for other apps. Jarvis Mobile is an MCP client (streamable HTTP) only.';
+}
+async function mcpOperation(action, args) {
+  const a = String(action || 'status').toLowerCase();
+  const cfg = mcpLoad();
+  if (a === 'status') return { ok: true, message: mcpConfig() };
+  if (a === 'config') return { ok: true, message: mcpConfig() };
+  if (a === 'add_server' || a === 'add') {
+    const name = memClean((args && (args.server || args.name)) || '');
+    const url = String((args && args.url) || '').trim();
+    if (!/^[a-z0-9_-]{1,40}$/i.test(name)) return { ok: false, message: 'Server ka simple naam chahiye (letters, numbers, - or _).' };
+    if (!/^https?:\/\//i.test(url)) return { ok: false, message: 'MCP server URL http(s) se shuru hona chahiye.' };
+    cfg.servers[name] = { url: url, token: String((args && args.token) || '').trim() };
+    mcpSave(cfg); renderMcp();
+    return { ok: true, message: 'MCP server "' + name + '" saved.' };
+  }
+  if (a === 'remove_server' || a === 'remove') {
+    const name = memClean((args && (args.server || args.name)) || '');
+    if (!cfg.servers[name]) return { ok: false, message: 'MCP server nahi mila.' };
+    delete cfg.servers[name]; mcpSave(cfg); renderMcp();
+    return { ok: true, message: 'MCP server "' + name + '" removed.' };
+  }
+  if (a === 'list_tools') return mcpListTools(memClean((args && (args.server || args.name)) || ''));
+  if (a === 'call') {
+    return mcpCall(memClean((args && (args.server || args.name)) || ''),
+      memClean((args && args.tool) || ''), args && args.arguments);
+  }
+  return { ok: false, message: 'MCP action not recognised. Use status, add_server, remove_server, list_tools or call.' };
+}
+function renderMcp() {
+  const el = $('#mcpState');
+  if (el) el.textContent = mcpConfig();
+}
+
+/* -------------------------------------------------- page read + summarize */
+async function pageRead() {
+  if (!hasNative) return { ok: false, message: 'Page reading sirf Android app mein chalta hai.' };
+  if (typeof Native.hasAutomation === 'function' && !Native.hasAutomation()) {
+    return { ok: false, needs_user_action: true, message: 'Phone automation off hai. Settings se on karein, phir screen padh sakta hoon.' };
+  }
+  let screen = '';
+  try {
+    const raw = callTool('ui_dump', {});
+    if (raw && raw.ok && raw.data && raw.data.screen) screen = String(raw.data.screen);
+    else if (raw && raw.message) screen = String(raw.message);
+  } catch (e) {
+    screen = '';
+  }
+  if (!screen) {
+    try { screen = String(Native.uiDump() || ''); } catch (e) { screen = ''; }
+  }
+  screen = memClean(screen).slice(0, 6000);
+  if (!screen) return { ok: false, message: 'Screen khali lag rahi hai ya automation off hai.' };
+  addSystemLine('PAGE · ' + screen.slice(0, 300));
+  return { ok: true, message: screen, data: { screen: screen } };
+}
+async function summarizePage(instructions) {
+  const read = await pageRead();
+  if (!read.ok) return read;
+  const ask = memClean(instructions || '') || 'Summarize what is on this screen in 3 short sentences.';
+  const summary = await llmText('Screen text:\n' + read.message.slice(0, 5000) + '\n\nTask: ' + ask);
+  return { ok: true, message: summary, data: { screen: read.message.slice(0, 1500) } };
+}
+async function summarizeText(text, instructions) {
+  const body = memClean(text || '').slice(0, 8000);
+  if (!body) return { ok: false, message: 'Summarize karne ke liye text chahiye.' };
+  const ask = memClean(instructions || '') || 'Summarize this in 3 short sentences, then give the single best next step.';
+  const summary = await llmText('Text:\n' + body + '\n\nTask: ' + ask);
+  return { ok: true, message: summary };
+}
+
+/* --------------------------------------------------------------- llm text */
+async function llmText(prompt, system, timeoutMs) {
+  const models = settings.model === 'smart' ? SMART_MODELS : FAST_MODELS;
+  let last = null;
+  for (const model of models) {
+    try {
+      const payload = {
+        contents: [{ role: 'user', parts: [{ text: String(prompt || '').slice(0, 12000) }] }],
+        generationConfig: { temperature: 0.4, maxOutputTokens: 700 }
+      };
+      if (system) payload.systemInstruction = { parts: [{ text: system }] };
+      const raw = await geminiRequest(model, payload, Math.max(8000, Math.min(18000, timeoutMs || 14000)));
+      const data = JSON.parse(raw);
+      const parts = (data.candidates && data.candidates[0] && data.candidates[0].content &&
+        data.candidates[0].content.parts) || [];
+      const text = parts.filter(p => p && p.text && !p.thought).map(p => p.text).join('\n').trim();
+      if (text) return text;
+      last = new Error('Gemini ne khali summary di.');
+    } catch (e) { last = e; }
+  }
+  throw last || new Error('Summary nahi ban saki.');
+}
+
+/* --------------------------------------------------------------- dictation */
+const DICT = { active: false, buffer: '', startedAt: 0 };
+function dictationStatusLine() {
+  if (!DICT.active) return 'Dictation off hai.';
+  return 'Dictation ON hai. Jo bolein woh current field mein type hoga. "stop dictation" se band karein.';
+}
+function dictationStart() {
+  if (DICT.active) return dictationStatusLine();
+  DICT.active = true;
+  DICT.buffer = '';
+  DICT.startedAt = Date.now();
+  try { Native.stopSpeaking(); } catch (e) { }
+  try { Native.holdListening(false); } catch (e) { }
+  setState('idle');
+  if (settings.handsFree) scheduleListen(300);
+  return 'Dictation on. Ab jo bolein woh is app ke focused field mein type hoga. "stop dictation" ya "band karo" se khatam karein.';
+}
+function dictationStop(reason) {
+  if (!DICT.active) return 'Dictation pehle se off hai.';
+  const text = DICT.buffer.trim();
+  DICT.active = false;
+  if (text) {
+    try { Native.copyText(text); } catch (e) { }
+  }
+  setState('idle');
+  if (settings.handsFree) scheduleListen(400);
+  return 'Dictation off.' + (text ? ' Poora text clipboard mein bhi hai.' : '') +
+    (reason ? ' (' + reason + ')' : '');
+}
+function dictationLastWordStart(text) {
+  const m = String(text || '').match(/\S+\s*$/);
+  return m ? m.index : 0;
+}
+function dictationLastSentenceStart(text) {
+  const s = String(text || '');
+  const m = s.match(/(^|[.!?\n]|[\u06d4])\s*[^.!?\n\u06d4]*$/);
+  return m ? m.index + (m[1] ? m[1].length : 0) : 0;
+}
+function dictationApplyEdit(buffer, phrase) {
+  const low = String(phrase || '').toLowerCase().trim();
+  const words = low.split(/\s+/).filter(Boolean);
+  const short = words.length <= 7;
+  if (!short) return { text: buffer, edit: false };
+  const text = buffer;
+  if (/^(stop|end|finish)\s+(the\s+)?dictation$|^dictation\s+(stop|off|band)$|^(band|bujha)\s+karo$|^bas\s+karo$/.test(low)) {
+    return { text: text, edit: true, stop: true };
+  }
+  if (/\b(new\s+paragraph|naya\s+paragraph|naya\s+para)\b/.test(low)) {
+    return { text: text.replace(/\s+$/, '') + '\n\n', edit: true };
+  }
+  if (/\b(new\s+line|nayi\s+line)\b/.test(low)) {
+    return { text: text.replace(/\s+$/, '') + '\n', edit: true };
+  }
+  if (/\b(delete\s+last\s+word|remove\s+last\s+word|word\s+hatao|aakhri\s+lafz\s+hatao)\b/.test(low)) {
+    return { text: text.slice(0, dictationLastWordStart(text)), edit: true };
+  }
+  if (/\b(scratch\s+that|delete\s+that|delete\s+last\s+sentence|undo\s+that|woh?\s+hata\s+do|pichla\s+hatao|mita\s+do)\b/.test(low)) {
+    return { text: text.slice(0, dictationLastSentenceStart(text)).replace(/\s+$/, ''), edit: true };
+  }
+  if (/\b(capitali[sz]e\s+that|capitali[sz]e\s+last)\b/.test(low)) {
+    const i = dictationLastWordStart(text);
+    const word = text.slice(i);
+    return { text: text.slice(0, i) + word.charAt(0).toUpperCase() + word.slice(1), edit: true };
+  }
+  if (/\b(uppercase\s+that|upper\s+case\s+that)\b/.test(low)) {
+    const i = dictationLastSentenceStart(text);
+    return { text: text.slice(0, i) + text.slice(i).toUpperCase(), edit: true };
+  }
+  if (/\b(lowercase\s+that|lower\s+case\s+that)\b/.test(low)) {
+    const i = dictationLastSentenceStart(text);
+    return { text: text.slice(0, i) + text.slice(i).toLowerCase(), edit: true };
+  }
+  if (/^(comma|add comma)$/.test(low)) return { text: text.replace(/\s+$/, '') + ', ', edit: true };
+  if (/^(period|full stop|add period)$/.test(low)) return { text: text.replace(/\s+$/, '') + '. ', edit: true };
+  if (/^(question mark|add question mark)$/.test(low)) return { text: text.replace(/\s+$/, '') + '? ', edit: true };
+  if (/^(exclamation mark|exclamation point|add exclamation)$/.test(low)) return { text: text.replace(/\s+$/, '') + '! ', edit: true };
+  if (/^(colon|add colon)$/.test(low)) return { text: text.replace(/\s+$/, '') + ': ', edit: true };
+  if (/^(semicolon|add semicolon)$/.test(low)) return { text: text.replace(/\s+$/, '') + '; ', edit: true };
+  return { text: text, edit: false };
+}
+function dictationInsert(segment) {
+  if (!segment) return 'none';
+  try {
+    if (hasNative && Native && typeof Native.insertText === 'function') {
+      const raw = Native.insertText(segment);
+      let r = {};
+      try { r = JSON.parse(raw || '{}'); } catch (e) { r = {}; }
+      if (r && r.ok) return r.mode || 'typed';
+      try { Native.copyText(DICT.buffer); } catch (e) { }
+      return 'clipboard';
+    }
+  } catch (e) { }
+  try { Native.copyText(DICT.buffer); } catch (e) { }
+  return 'clipboard';
+}
+function dictationReplace(buffer) {
+  try {
+    if (hasNative && Native && typeof Native.replaceText === 'function') {
+      const raw = Native.replaceText(buffer);
+      let r = {};
+      try { r = JSON.parse(raw || '{}'); } catch (e) { r = {}; }
+      if (r && r.ok) return r.mode || 'replaced';
+    }
+  } catch (e) { }
+  try { Native.copyText(buffer); } catch (e) { }
+  return 'clipboard';
+}
+function dictationHandle(phrase) {
+  if (!DICT.active) return false;
+  const result = dictationApplyEdit(DICT.buffer, phrase);
+  if (result.stop) {
+    const line = dictationStop('stopped by voice');
+    respond(line, line);
+    return true;
+  }
+  if (result.edit) {
+    DICT.buffer = result.text;
+    const mode = dictationReplace(DICT.buffer);
+    toast('Edit: ' + (mode === 'clipboard' ? 'text clipboard mein hai' : 'field update ho gayi'));
+    setState('idle');
+    if (settings.handsFree) scheduleListen(350);
+    return true;
+  }
+  const clean = memClean(phrase);
+  if (!clean) {
+    setState('idle');
+    if (settings.handsFree) scheduleListen(350);
+    return true;
+  }
+  const spacer = DICT.buffer && !/\s$/.test(DICT.buffer) ? ' ' : '';
+  const segment = spacer + clean;
+  DICT.buffer += segment;
+  const mode = dictationInsert(segment + ' ');
+  try { Native.log('DICT ' + JSON.stringify({ mode: mode, length: DICT.buffer.length })); } catch (e) { }
+  toast(mode === 'clipboard' ? 'Dictation: text clipboard mein hai — paste kar lein.' : 'Dictation: typed.');
+  setState('idle');
+  if (settings.handsFree) scheduleListen(300);
+  return true;
 }
 
 /* ============================================================== GEMINI BRAIN */
@@ -2686,6 +3820,120 @@ function toolDeclarations() {
         },
         required: ['query']
       }
+    },
+    {
+      name: 'persona',
+      description: 'Read or change Jarvis personality, learn the user\'s writing voice from a sample, or save writing feedback. Use this for "be more concise", "learn my writing: ...", "show my personality".',
+      parameters: {
+        type: 'OBJECT',
+        properties: {
+          action: { type: 'STRING', description: 'show, set, custom, learn, feedback or reset' },
+          style: { type: 'STRING', description: 'jarvis, professional, friendly, concise, mentor, creative or custom' },
+          text: { type: 'STRING', description: 'Custom instruction, writing sample or feedback text' }
+        },
+        required: ['action']
+      }
+    },
+    {
+      name: 'calendar',
+      description: 'Local phone calendar: add, list, read, update, reschedule, delete, export .ics and open an event in the real phone calendar. Understands "tomorrow 5 pm", "kal 3 baje", "in 2 hours" and dates.',
+      parameters: {
+        type: 'OBJECT',
+        properties: {
+          action: { type: 'STRING', description: 'add, list, update, delete, insert or export' },
+          title: { type: 'STRING', description: 'Event title' },
+          when: { type: 'STRING', description: 'Date/time, e.g. "tomorrow 5 pm" or "kal 3 baje"' },
+          duration_minutes: { type: 'INTEGER', description: 'Default 30' },
+          location: { type: 'STRING' },
+          notes: { type: 'STRING' },
+          attendees: { type: 'STRING', description: 'Comma-separated emails (stored with the event)' },
+          query: { type: 'STRING', description: 'Event id or title for update/delete/insert' },
+          range: { type: 'STRING', description: 'today, week, upcoming or all' },
+          insert_phone: { type: 'BOOLEAN', description: 'true also opens ACTION_INSERT in the phone calendar app' }
+        },
+        required: ['action']
+      }
+    },
+    {
+      name: 'routine',
+      description: 'Scheduled voice routines that run while Jarvis is open or its background service is alive. Add "07:30: news sunao", list and delete routines.',
+      parameters: {
+        type: 'OBJECT',
+        properties: {
+          action: { type: 'STRING', description: 'list, add, delete or toggle' },
+          time: { type: 'STRING', description: '24-hour HH:MM' },
+          task: { type: 'STRING', description: 'Command to run, e.g. "news sunao"' },
+          query: { type: 'STRING', description: 'Routine id, time or task for delete/toggle' }
+        },
+        required: ['action']
+      }
+    },
+    {
+      name: 'workspace',
+      description: 'Real work tools with the user\'s own tokens: GitHub issues/PRs, Slack read/summarize/post, Notion search/read/append, Linear and Jira. Tokens stay in local storage. Writes ask for confirmation.',
+      parameters: {
+        type: 'OBJECT',
+        properties: {
+          action: { type: 'STRING', description: 'status, configure, list, summarize, read, create, post, comment or append' },
+          service: { type: 'STRING', description: 'github, slack, notion, linear or jira' },
+          token: { type: 'STRING', description: 'Service token (never echoed back)' },
+          repo: { type: 'STRING', description: 'GitHub owner/name' },
+          channel: { type: 'STRING', description: 'Slack channel' },
+          project: { type: 'STRING', description: 'Linear team id or Jira project key' },
+          url: { type: 'STRING', description: 'Jira base URL' },
+          email: { type: 'STRING', description: 'Jira account email' },
+          query: { type: 'STRING', description: 'Search text or Notion page id' },
+          title: { type: 'STRING' },
+          text: { type: 'STRING' },
+          body: { type: 'STRING' },
+          confirmed: { type: 'BOOLEAN', description: 'true only after the user confirmed a write' }
+        },
+        required: ['action']
+      }
+    },
+    {
+      name: 'mcp',
+      description: 'Remote Model Context Protocol client over streamable HTTP: save servers, list their tools and call a tool. Phones cannot host a stdio MCP server for other apps.',
+      parameters: {
+        type: 'OBJECT',
+        properties: {
+          action: { type: 'STRING', description: 'status, add_server, remove_server, list_tools, call or config' },
+          server: { type: 'STRING', description: 'Saved server name' },
+          url: { type: 'STRING', description: 'MCP server https URL' },
+          token: { type: 'STRING' },
+          tool: { type: 'STRING' },
+          arguments: { type: 'STRING', description: 'JSON object of tool arguments' }
+        },
+        required: ['action']
+      }
+    },
+    {
+      name: 'read_page',
+      description: 'Read the visible text of the CURRENT screen/app (needs Phone automation). Use before answering questions about what is on screen.',
+      parameters: { type: 'OBJECT', properties: {} }
+    },
+    {
+      name: 'summarize_text',
+      description: 'Summarize long text or, when text is empty, summarize the current screen. Use for "summarize this page" or a pasted article.',
+      parameters: {
+        type: 'OBJECT',
+        properties: {
+          text: { type: 'STRING', description: 'Text to summarize; empty means the current screen' },
+          instructions: { type: 'STRING', description: 'What the summary should focus on' }
+        }
+      }
+    },
+    {
+      name: 'dictation',
+      description: 'Global dictation: type speech into another app. action=start/stop/status, or action=type with exact text. Voice edits like "scratch that" work while dictation is on.',
+      parameters: {
+        type: 'OBJECT',
+        properties: {
+          action: { type: 'STRING', description: 'start, stop, status or type' },
+          text: { type: 'STRING', description: 'Text to type for action=type' }
+        },
+        required: ['action']
+      }
     }
   ];
 }
@@ -2726,6 +3974,11 @@ function buildSystemPrompt(userText) {
       ? 'ON — you can tap through other apps. Use ui_dump before tapping.'
       : 'OFF — ui_click / ui_type / ui_dump / system_action and full install will ask the user to enable it. App opens, Play Store search and normal tools still work.'),
     'MEMORY: you have real long-term memory on this phone. When the user shares something lasting, or says "yaad rakho" / "never forget", call remember with a short English fact, a category and importance (pin:true for a permanent detail). When asked what you remember about a topic, call recall_memory FIRST; never say you forgot before checking. Use forget_memory when the user asks you to forget something. Answer naturally and never read the whole list out.',
+    'PERSONALITY PROFILE:\n' + personaPromptBlock(),
+    'ASSISTANT 2.2: persona, calendar (local + phone), routine, workspace (GitHub/Slack/Notion/Linear/Jira with local tokens), mcp (remote streamable HTTP), read_page, summarize_text and dictation are available. Use workspace list/summarize before writing; writes need the user to confirm.',
+    'DICTATION: dictation action=start types speech into other apps; "scratch that", "capitalize that", "new paragraph", "comma" edit the dictation buffer. It needs Phone automation for direct typing, otherwise text goes to the clipboard.',
+    'ROUTINES: routines run only while Jarvis is open or its background service is alive; never promise they run after the app is killed.',
+    'CALENDAR: action=add stores locally; pass insert_phone:true when the user wants it in the real phone calendar. Always use the real date/time returned by the tool, never invent it.',
     'SPEED AND STYLE: your answer is spoken aloud. Answer the question asked, do not pad. Actions: 1-2 short sentences. Questions: up to 4 short sentences. No lists, markdown, emojis or stage directions.',
     'MEMORY (about the user):',
     memoryBlock,
@@ -2832,6 +4085,41 @@ async function runTool(name, args) {
     renderMemory();
     if (!removed.length) return { ok: false, message: 'Mujhe aisi koi memory nahi mili.' };
     return { ok: true, message: 'Bhool gaya: ' + removed.map(f => f.text).join('; ') };
+  }
+  if (name === 'persona') {
+    return { ok: true, message: personaOperation(args && args.action, args || {}) };
+  }
+  if (name === 'calendar') {
+    return { ok: true, message: calOperation(args && args.action, args || {}) };
+  }
+  if (name === 'routine') {
+    return { ok: true, message: routineOperation(args && args.action, args || {}) };
+  }
+  if (name === 'workspace') {
+    return workspaceOperation(args && args.action, args || {});
+  }
+  if (name === 'mcp') {
+    return mcpOperation(args && args.action, args || {});
+  }
+  if (name === 'read_page') {
+    return pageRead();
+  }
+  if (name === 'summarize_text') {
+    if (args && args.text) return summarizeText(args.text, args && args.instructions);
+    return summarizePage(args && args.instructions);
+  }
+  if (name === 'dictation') {
+    const action = String((args && args.action) || 'status').toLowerCase();
+    if (action === 'start') return { ok: true, message: dictationStart() };
+    if (action === 'stop') return { ok: true, message: dictationStop('stopped') };
+    if (action === 'status') return { ok: true, message: dictationStatusLine() };
+    if (action === 'type') {
+      const text = memClean((args && args.text) || '');
+      if (!text) return { ok: false, message: 'Kya type karna hai?' };
+      const mode = dictationInsert(text);
+      return { ok: true, message: mode === 'clipboard' ? 'Text clipboard mein hai — paste kar lein.' : 'Text type kar diya.' };
+    }
+    return { ok: false, message: 'Dictation action: start, stop, status or type.' };
   }
   return callTool(name, args || {});
 }
@@ -3146,7 +4434,7 @@ function renderSettings() {
 
   const about = $('#aboutText');
   if (about) {
-    let v = '2.1.0';
+    let v = '2.2.0';
     let d = 'Android';
     try { v = Native.version(); d = Native.deviceSummary(); } catch (e) { }
     about.textContent = 'Jarvis Mobile ' + v + ' · ' + d;
@@ -3227,6 +4515,11 @@ function openSheet(id) {
   if (id === 'sheet') renderSettings();
   if (id === 'memorySheet') renderMemory();
   if (id === 'voiceSheet') renderVoices();
+  if (id === 'personaSheet') renderPersona();
+  if (id === 'calendarSheet') renderCalendar();
+  if (id === 'routineSheet') renderRoutines();
+  if (id === 'workSheet') { renderWorkInputs(); }
+  if (id === 'mcpSheet') renderMcp();
 }
 
 function closeSheets() {
@@ -3338,6 +4631,172 @@ function addMemoryFact() {
   renderMemory();
   renderSettings();
   toast('Yaad rakh liya.');
+}
+
+/* --------------------------------------------------------- assistant 2.2 UI */
+function sheetOut(id, text) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = String(text || '');
+}
+
+function renderPersona() {
+  const p = personaGet();
+  const state = $('#personaState');
+  if (state) {
+    state.textContent = 'Style: ' + p.style + ' · samples: ' + p.samples.length +
+      ' · feedback notes: ' + p.feedback.length + '\n' + personaPromptBlock().slice(0, 420);
+  }
+  const sel = $('#personaStyle');
+  if (sel) sel.value = p.style;
+  const custom = $('#personaCustom');
+  if (custom) custom.value = p.custom;
+}
+function openPersona() { openSheet('personaSheet'); renderPersona(); }
+function savePersonaStyle() {
+  const sel = $('#personaStyle');
+  const msg = personaOperation('set', { style: sel && sel.value });
+  renderPersona();
+  toast(msg);
+}
+function savePersonaCustom() {
+  const el = $('#personaCustom');
+  const msg = personaOperation('custom', { text: el && el.value });
+  renderPersona();
+  toast(msg);
+}
+function learnPersona() {
+  const el = $('#personaSamples');
+  const msg = personaOperation('learn', { text: el && el.value });
+  if (el && msg.indexOf('learned') >= 0) el.value = '';
+  renderPersona();
+  toast(msg);
+}
+function savePersonaFeedback() {
+  const el = $('#personaFeedback');
+  const msg = personaOperation('feedback', { text: el && el.value });
+  if (el && msg.indexOf('Noted') >= 0) el.value = '';
+  renderPersona();
+  toast(msg);
+}
+
+let calUiRange = 'all';
+function openCalendarSheet() {
+  openSheet('calendarSheet');
+  calUiRange = 'all';
+  renderCalendar();
+}
+function addCalendarFromUi() {
+  const title = $('#calTitle');
+  const when = $('#calWhen');
+  const dur = $('#calDuration');
+  const insert = $('#calInsertPhone');
+  const msg = calOperation('add', {
+    title: title && title.value,
+    when: when && when.value,
+    duration_minutes: dur && Number(dur.value),
+    insert_phone: !!(insert && insert.checked)
+  });
+  if (msg.indexOf('Event created') >= 0) {
+    if (title) title.value = '';
+    if (when) when.value = '';
+  }
+  renderCalendar();
+  toast(msg);
+}
+
+function openRoutineSheet() {
+  openSheet('routineSheet');
+  renderRoutines();
+}
+function addRoutineFromUi() {
+  const time = $('#routineTime');
+  const task = $('#routineTask');
+  const msg = routineOperation('add', { time: time && time.value, task: task && task.value });
+  if (msg.indexOf('Routine added') >= 0 && task) task.value = '';
+  renderRoutines();
+  toast(msg);
+}
+
+function renderWorkInputs() {
+  const service = ($('#workService') && $('#workService').value) || 'github';
+  const c = wsCfg(service);
+  const set = (id, value) => { const el = $('#' + id); if (el) el.value = value || ''; };
+  set('workRepo', c.repo);
+  set('workChannel', c.channel);
+  set('workProject', c.project);
+  set('workUrl', c.url);
+  set('workEmail', c.email);
+  const token = $('#workToken');
+  if (token) token.value = '';
+  renderWork();
+}
+function openWorkSheet() {
+  openSheet('workSheet');
+  renderWorkInputs();
+}
+function saveWorkFromUi() {
+  const service = ($('#workService') && $('#workService').value) || 'github';
+  const val = id => (($('#' + id) && $('#' + id).value) || '').trim();
+  const msg = wsConfigure({
+    service: service, token: val('workToken'), repo: val('workRepo'),
+    channel: val('workChannel'), project: val('workProject'),
+    url: val('workUrl'), email: val('workEmail')
+  });
+  const token = $('#workToken');
+  if (token && msg.indexOf('configured') >= 0) token.value = '';
+  renderWorkInputs();
+  toast(msg);
+}
+async function runWorkFromUi(mode) {
+  const service = ($('#workService') && $('#workService').value) || 'github';
+  const val = id => (($('#' + id) && $('#' + id).value) || '').trim();
+  sheetOut('workOut', 'Working...');
+  try {
+    const r = await workspaceOperation(mode, {
+      service: service, query: val('workQuery'), channel: val('workChannel'),
+      repo: val('workRepo'), project: val('workProject'), url: val('workUrl'),
+      email: val('workEmail')
+    });
+    sheetOut('workOut', (r.ok ? '' : 'FAIL · ') + (r.message || ''));
+    if (!r.ok && r.needs_user_action) sheetOut('workOut', r.message + '\n\nBolein: "confirm".');
+  } catch (e) {
+    sheetOut('workOut', 'Error: ' + (e && e.message || e));
+  }
+}
+
+function openMcpSheet() {
+  openSheet('mcpSheet');
+  renderMcp();
+}
+async function mcpAddFromUi() {
+  const val = id => (($('#' + id) && $('#' + id).value) || '').trim();
+  const r = await mcpOperation('add_server', {
+    server: val('mcpName'), url: val('mcpUrl'), token: val('mcpToken')
+  });
+  sheetOut('mcpOut', r.message);
+  const token = $('#mcpToken');
+  if (token && r.ok) token.value = '';
+  renderMcp();
+}
+async function mcpListFromUi() {
+  const name = (($('#mcpName') && $('#mcpName').value) || '').trim();
+  sheetOut('mcpOut', 'Connecting...');
+  const r = await mcpOperation('list_tools', { server: name });
+  sheetOut('mcpOut', (r.ok ? '' : 'FAIL · ') + (r.message || ''));
+}
+async function mcpCallFromUi() {
+  const name = (($('#mcpName') && $('#mcpName').value) || '').trim();
+  const tool = (($('#mcpTool') && $('#mcpTool').value) || '').trim();
+  const args = (($('#mcpArgs') && $('#mcpArgs').value) || '').trim();
+  sheetOut('mcpOut', 'Calling...');
+  const r = await mcpOperation('call', { server: name, tool: tool, arguments: args });
+  sheetOut('mcpOut', (r.ok ? '' : 'FAIL · ') + (r.message || ''));
+}
+async function mcpRemoveFromUi() {
+  const name = (($('#mcpName') && $('#mcpName').value) || '').trim();
+  const r = await mcpOperation('remove_server', { server: name });
+  sheetOut('mcpOut', r.message);
+  renderMcp();
 }
 
 /* ------------------------------------------------------------------ voices */
@@ -3494,6 +4953,14 @@ window.jarvisNative = {
     try {
       Native.log('HEARD ' + JSON.stringify({ raw: text || '', chosen: command, alts: alts.slice(0, 8) }));
     } catch (e) { }
+
+    // Dictation: every utterance goes into the dictation buffer instead of the
+    // wake-word/command path. Edits ("scratch that") are handled here too.
+    if (DICT.active) {
+      dictationHandle(command);
+      if (bgMode()) pushToTalk = false;
+      return;
+    }
 
     if (!pushToTalk && settings.wakeRequired) {
       const rest = wakeCommand(command);
@@ -3661,6 +5128,11 @@ function bindEvents() {
   $('#sheetClose').addEventListener('click', closeSheets);
   $('#memoryClose').addEventListener('click', closeSheets);
   $('#voiceClose').addEventListener('click', closeSheets);
+  $('#personaClose').addEventListener('click', closeSheets);
+  $('#calendarClose').addEventListener('click', closeSheets);
+  $('#routineClose').addEventListener('click', closeSheets);
+  $('#workClose').addEventListener('click', closeSheets);
+  $('#mcpClose').addEventListener('click', closeSheets);
   $('#overlay').addEventListener('click', closeSheets);
 
   $$('#modelSeg button').forEach(b => b.addEventListener('click', () => {
@@ -3869,6 +5341,50 @@ function bindEvents() {
     toast('Memory clear.');
   });
 
+  // Assistant 2.2 sheets
+  $('#openPersona').addEventListener('click', openPersona);
+  $('#openCalendar').addEventListener('click', openCalendarSheet);
+  $('#openRoutines').addEventListener('click', openRoutineSheet);
+  $('#openWork').addEventListener('click', openWorkSheet);
+  $('#openMcp').addEventListener('click', openMcpSheet);
+
+  $('#personaStyleSave').addEventListener('click', savePersonaStyle);
+  $('#personaCustomSave').addEventListener('click', savePersonaCustom);
+  $('#personaLearn').addEventListener('click', learnPersona);
+  $('#personaFeedbackSave').addEventListener('click', savePersonaFeedback);
+  $('#personaReset').addEventListener('click', () => {
+    if (!confirm('Personality aur writing samples reset karein?')) return;
+    personaOperation('reset', {});
+    renderPersona();
+    toast('Personality reset.');
+  });
+
+  $('#calAdd').addEventListener('click', addCalendarFromUi);
+  $('#calWhen').addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); addCalendarFromUi(); }
+  });
+  $('#calExport').addEventListener('click', () => {
+    const msg = calOperation('export', {});
+    toast(msg);
+  });
+  $('#calToday').addEventListener('click', () => { calUiRange = 'today'; renderCalendar(); });
+  $('#calWeek').addEventListener('click', () => { calUiRange = 'week'; renderCalendar(); });
+
+  $('#routineAdd').addEventListener('click', addRoutineFromUi);
+  $('#routineTask').addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); addRoutineFromUi(); }
+  });
+
+  $('#workService').addEventListener('change', renderWorkInputs);
+  $('#workSave').addEventListener('click', saveWorkFromUi);
+  $('#workList').addEventListener('click', () => runWorkFromUi('list'));
+  $('#workSummarize').addEventListener('click', () => runWorkFromUi('summarize'));
+
+  $('#mcpAdd').addEventListener('click', mcpAddFromUi);
+  $('#mcpList').addEventListener('click', mcpListFromUi);
+  $('#mcpRemove').addEventListener('click', mcpRemoveFromUi);
+  $('#mcpCall').addEventListener('click', mcpCallFromUi);
+
   $$('#quick button').forEach(b => b.addEventListener('click', () => quickAction(b.dataset.quick)));
 
   $('#onboardStart').addEventListener('click', () => {
@@ -3946,6 +5462,11 @@ function init() {
   window.addEventListener('beforeunload', () => {
     try { Native.cancelListening(); Native.stopSpeaking(); } catch (e) { }
   });
+
+  // Routines: checked while the page is alive. This is honest: Android may kill
+  // the whole process, so no promise of a background alarm.
+  setInterval(routineCheck, 20000);
+  setTimeout(routineCheck, 4000);
 
   // Expose a tiny self-test for adb debugging.
   window.__jarvisSelfTest = () => {

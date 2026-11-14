@@ -239,6 +239,20 @@
     </div>
 
     <div class="set-group">
+      <div class="set-title">ASSISTANT 2.2</div>
+      <div class="btn-row">
+        <button id="openPersona" class="mini-btn">Personality</button>
+        <button id="openCalendar" class="mini-btn">Calendar</button>
+        <button id="openRoutines" class="mini-btn">Routines</button>
+      </div>
+      <div class="btn-row">
+        <button id="openWork" class="mini-btn">Work tools</button>
+        <button id="openMcp" class="mini-btn">MCP</button>
+      </div>
+      <p class="hint">Dictation: bolein “start dictation”. Personality, calendar, routines aur work tokens sab is phone par save hote hain.</p>
+    </div>
+
+    <div class="set-group">
       <div class="row">
         <div>
           <b>Memory</b>
@@ -250,7 +264,7 @@
 
     <div class="set-group about">
       <div class="set-title">ABOUT</div>
-      <p class="hint" id="aboutText">Jarvis Mobile 2.1.0</p>
+      <p class="hint" id="aboutText">Jarvis Mobile 2.2.0</p>
       <p class="hint">Android 14–17 · background always-on · Gemini cloud brain · neural voice.</p>
     </div>
   </div>
@@ -281,6 +295,165 @@
   <div class="sheet-body">
     <button id="voiceAuto" class="mini-btn wide">AUTO (BEST MALE)</button>
     <div id="voiceList" class="voice-list"></div>
+  </div>
+</section>
+
+<!-- ============================ PERSONALITY ============================ -->
+<section id="personaSheet" class="sheet hidden" aria-label="Personality">
+  <div class="sheet-head">
+    <div><h2>Personality</h2><p class="hint">Jarvis ka tone aur aap ka writing style.</p></div>
+    <button id="personaClose" class="icon-btn" aria-label="Close">✕</button>
+  </div>
+  <div class="sheet-body">
+    <div class="hint pre" id="personaState"></div>
+    <div class="set-title">STYLE</div>
+    <select id="personaStyle" class="mini-select">
+      <option value="jarvis">Jarvis · calm, witty</option>
+      <option value="professional">Professional · formal</option>
+      <option value="friendly">Friendly · warm</option>
+      <option value="concise">Concise · very short</option>
+      <option value="mentor">Mentor · explains</option>
+      <option value="creative">Creative · playful</option>
+      <option value="custom">Custom · my instruction</option>
+    </select>
+    <button id="personaStyleSave" class="mini-btn wide">SAVE STYLE</button>
+    <div class="set-title">CUSTOM INSTRUCTION</div>
+    <textarea id="personaCustom" class="mini-text" rows="3" placeholder="Example: Roman Urdu mein short sentences, no jokes."></textarea>
+    <button id="personaCustomSave" class="mini-btn wide">SAVE CUSTOM INSTRUCTION</button>
+    <div class="set-title">YOUR WRITING VOICE</div>
+    <textarea id="personaSamples" class="mini-text" rows="4" placeholder="Apna likha hua ek paragraph paste karein — Jarvis isi tone mein likhega."></textarea>
+    <button id="personaLearn" class="mini-btn wide">LEARN MY VOICE</button>
+    <div class="key-row">
+      <input id="personaFeedback" type="text" placeholder="Feedback: zyada formal mat raho..." autocomplete="off">
+      <button id="personaFeedbackSave" class="mini-btn">Save</button>
+    </div>
+    <button id="personaReset" class="link danger">Reset personality and samples</button>
+  </div>
+</section>
+
+<!-- ============================ CALENDAR ============================ -->
+<section id="calendarSheet" class="sheet hidden" aria-label="Calendar">
+  <div class="sheet-head">
+    <div><h2>Calendar</h2><p class="hint">Local events + real phone calendar insert.</p></div>
+    <button id="calendarClose" class="icon-btn" aria-label="Close">✕</button>
+  </div>
+  <div class="sheet-body">
+    <div id="calList" class="memory-list"></div>
+    <div class="key-row">
+      <input id="calTitle" type="text" placeholder="Event title, e.g. Ali meeting" autocomplete="off">
+    </div>
+    <div class="key-row">
+      <input id="calWhen" type="text" placeholder="Time: kal 3 baje / tomorrow 5 pm / in 2 hours" autocomplete="off">
+    </div>
+    <div class="key-row">
+      <input id="calDuration" type="number" min="5" max="720" step="5" value="30">
+      <button id="calAdd" class="mini-btn">Add event</button>
+    </div>
+    <div class="row tight">
+      <span class="hint">Phone calendar mein bhi kholna hai?</span>
+      <label class="switch">
+        <input id="calInsertPhone" type="checkbox">
+        <span></span>
+      </label>
+    </div>
+    <div class="btn-row">
+      <button id="calExport" class="mini-btn">Copy .ics</button>
+      <button id="calToday" class="mini-btn">Today</button>
+      <button id="calWeek" class="mini-btn">This week</button>
+    </div>
+    <p class="hint">Phone calendar insert Android ka standard screen kholta hai; wahan Save dabana hota hai — Jarvis khud save nahi karta.</p>
+  </div>
+</section>
+
+<!-- ============================ ROUTINES ============================ -->
+<section id="routineSheet" class="sheet hidden" aria-label="Routines">
+  <div class="sheet-head">
+    <div><h2>Routines</h2><p class="hint">Roz ek waqt par command chalayein.</p></div>
+    <button id="routineClose" class="icon-btn" aria-label="Close">✕</button>
+  </div>
+  <div class="sheet-body">
+    <div id="routineList" class="memory-list"></div>
+    <div class="key-row">
+      <input id="routineTime" type="time" value="07:30">
+      <input id="routineTask" type="text" placeholder="Task: news sunao" autocomplete="off">
+    </div>
+    <button id="routineAdd" class="mini-btn wide">ADD ROUTINE</button>
+    <p class="hint">Routines sirf tab chalti hain jab Jarvis khula ho ya uska background service zinda ho. App band hone ke baad guarantee nahi.</p>
+  </div>
+</section>
+
+<!-- ============================ WORK TOOLS ============================ -->
+<section id="workSheet" class="sheet hidden" aria-label="Work tools">
+  <div class="sheet-head">
+    <div><h2>Work tools</h2><p class="hint">GitHub · Slack · Notion · Linear · Jira</p></div>
+    <button id="workClose" class="icon-btn" aria-label="Close">✕</button>
+  </div>
+  <div class="sheet-body">
+    <div class="hint pre" id="workState"></div>
+    <div class="set-title">CONNECT A SERVICE</div>
+    <select id="workService" class="mini-select">
+      <option value="github">GitHub</option>
+      <option value="slack">Slack</option>
+      <option value="notion">Notion</option>
+      <option value="linear">Linear</option>
+      <option value="jira">Jira</option>
+    </select>
+    <div class="key-row">
+      <input id="workToken" type="password" placeholder="Service token (e.g. ghp_..., xoxb-..., secret_...)" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="key-row">
+      <input id="workRepo" type="text" placeholder="GitHub repo: owner/name" autocomplete="off">
+    </div>
+    <div class="key-row">
+      <input id="workChannel" type="text" placeholder="Slack channel: engineering" autocomplete="off">
+      <input id="workProject" type="text" placeholder="Linear team id / Jira key" autocomplete="off">
+    </div>
+    <div class="key-row">
+      <input id="workUrl" type="text" placeholder="Jira URL: https://team.atlassian.net" autocomplete="off">
+    </div>
+    <div class="key-row">
+      <input id="workEmail" type="text" placeholder="Jira email" autocomplete="off">
+      <input id="workQuery" type="text" placeholder="Search / page id" autocomplete="off">
+    </div>
+    <button id="workSave" class="mini-btn wide">SAVE TOKEN &amp; SETTINGS</button>
+    <div class="btn-row">
+      <button id="workList" class="mini-btn">Read / list</button>
+      <button id="workSummarize" class="mini-btn">Summarize</button>
+    </div>
+    <div class="hint pre" id="workOut"></div>
+    <p class="hint">Writes (create/post/comment) confirm maangte hain — “confirm” bolein. Tokens sirf is phone par save hote hain.</p>
+  </div>
+</section>
+
+<!-- ============================ MCP ============================ -->
+<section id="mcpSheet" class="sheet hidden" aria-label="MCP">
+  <div class="sheet-head">
+    <div><h2>MCP client</h2><p class="hint">Remote streamable-HTTP MCP servers.</p></div>
+    <button id="mcpClose" class="icon-btn" aria-label="Close">✕</button>
+  </div>
+  <div class="sheet-body">
+    <div class="hint pre" id="mcpState"></div>
+    <div class="key-row">
+      <input id="mcpName" type="text" placeholder="Server name, e.g. tools" autocomplete="off">
+    </div>
+    <div class="key-row">
+      <input id="mcpUrl" type="text" placeholder="https://example.com/mcp" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="key-row">
+      <input id="mcpToken" type="password" placeholder="Bearer token (optional)" autocomplete="off" spellcheck="false">
+      <button id="mcpAdd" class="mini-btn">Add</button>
+    </div>
+    <div class="btn-row">
+      <button id="mcpList" class="mini-btn">List tools</button>
+      <button id="mcpRemove" class="mini-btn">Remove server</button>
+    </div>
+    <div class="key-row">
+      <input id="mcpTool" type="text" placeholder="Tool name" autocomplete="off">
+      <input id="mcpArgs" type="text" placeholder='Arguments JSON: {"q":"x"}' autocomplete="off">
+    </div>
+    <button id="mcpCall" class="mini-btn wide">CALL TOOL</button>
+    <div class="hint pre" id="mcpOut"></div>
+    <p class="hint">Phone stdio MCP server host nahi kar sakta; Yeh client sirf HTTP servers se baat karta hai.</p>
   </div>
 </section>
 
