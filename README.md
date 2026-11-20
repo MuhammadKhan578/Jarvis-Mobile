@@ -8,10 +8,15 @@ APK with the Android SDK command-line tools.
 
 ## Features
 
-- **Always online (background)** — a foreground service keeps Jarvis listening
+- **Bug-fix release (v2.2.1)** — model JSON is always converted into a clean
+  chat reply, foreground commands such as “YouTube kholo” work without a wake
+  word and always report the real launch result, and microphone restart chimes
+  are silenced without muting media or making the orb flash on/off. Tap-to-talk
+  is now the safe default; hands-free/background listening is explicit opt-in.
+- **Always online (background, optional)** — a foreground service keeps Jarvis listening
   after you leave the app: say "Jarvis ..." from any app, even with the screen
   off. A low-priority "Jarvis online" notification stays visible (Android
-  requires it). Turn it off in **Settings > Always online (background)**.
+  requires it). Turn on hands-free and background mode in **Settings**.
 - Tap the orb and speak in English or Roman Urdu (or type a command).
 - **Fast answers** — short recognition silence window, trimmed prompt/history,
   and a pre-warmed neural-voice cache so common replies start instantly.
@@ -176,7 +181,7 @@ powershell -ExecutionPolicy Bypass -File .\build_apk.ps1 `
   -Sdk "C:\Android\Sdk" -Jdk "C:\Program Files\Java\jdk-17"
 ```
 
-Output: `JarvisMobile.apk` in this folder. Version 2.2.0 (versionCode 12).
+Output: `JarvisMobile.apk` in this folder. Version 2.2.1 (versionCode 13).
 
 On the first build the script creates a local development keystore at
 `keystore/jarvis.keystore` with a random password saved in

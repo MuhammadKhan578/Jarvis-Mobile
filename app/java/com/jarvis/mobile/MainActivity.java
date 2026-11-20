@@ -29,12 +29,21 @@ public class MainActivity extends Activity {
     private SpeechEngine speech;
     private String pendingCmd = null;
     private boolean pageLoaded = false;
+    private boolean debugBuild = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        pendingCmd = getIntent() == null ? null : getIntent().getStringExtra("cmd");
+        try {
+            debugBuild = (getApplicationInfo().flags
+                    & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0;
+        } catch (Exception ignored) { debugBuild = false; }
+        // The cmd extra is an adb/QA hook, not a public automation API. The
+        // launcher activity is exported by Android, so accepting it in a release
+        // build would let another app silently issue Jarvis commands.
+        pendingCmd = debugBuild && getIntent() != null
+                ? getIntent().getStringExtra("cmd") : null;
 
         try {
             getWindow().setStatusBarColor(Color.TRANSPARENT);
@@ -51,7 +60,7 @@ public class MainActivity extends Activity {
         }
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
 
-        WebView.setWebContentsDebuggingEnabled(true);
+        WebView.setWebContentsDebuggingEnabled(debugBuild);
 
         web = new WebView(this);
         web.setBackgroundColor(Color.parseColor("#050B12"));
@@ -80,9 +89,11 @@ public class MainActivity extends Activity {
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
                 pageLoaded = true;
-                view.evaluateJavascript(
-                        "console.log('JARVIS_SELFTEST '+(window.__jarvisSelfTest?window.__jarvisSelfTest():'no-selftest'))",
-                        null);
+                if (debugBuild) {
+                    view.evaluateJavascript(
+                            "console.log('JARVIS_SELFTEST '+(window.__jarvisSelfTest?window.__jarvisSelfTest():'no-selftest'))",
+                            null);
+                }
                 if (pendingCmd != null && !pendingCmd.isEmpty()) {
                     String cmd = pendingCmd;
                     pendingCmd = null;
@@ -165,7 +176,7 @@ public class MainActivity extends Activity {
     protected void onNewIntent(android.content.Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
-        if (intent == null || web == null) return;
+        if (!debugBuild || intent == null || web == null) return;
         String cmd = intent.getStringExtra("cmd");
         if (cmd != null && !cmd.isEmpty()) {
             if (!pageLoaded) { pendingCmd = cmd; return; }

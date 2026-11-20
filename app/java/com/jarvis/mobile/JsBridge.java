@@ -137,6 +137,7 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
             if (speech == null) return;
             if (micMuted) speech.setHeld(true);
             else speech.setHeld(false);
+            if (!micMuted) speech.restoreAudioNow();
         } catch (Exception ignored) { }
     }
 
@@ -151,6 +152,9 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
         pendingUrdu = urdu == null ? "" : urdu.trim();
         final int seq = ++speechSeq;
         try { if (speech != null) speech.setHeld(true); } catch (Exception ignored) { }
+        // The recognizer's ending chime may still be pending; unmute so the
+        // reply is never clipped or silent.
+        try { if (speech != null) speech.restoreAudioNow(); } catch (Exception ignored) { }
         if (pendingRoman.isEmpty() && pendingUrdu.isEmpty()) {
             releaseMic();
             callJs("window.jarvisNative&&jarvisNative.onTtsDone()");
@@ -187,6 +191,7 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
         neuralActive = false;
         tts.stop();
         releaseMic();
+        try { if (speech != null) speech.restoreAudioNow(); } catch (Exception ignored) { }
     }
 
     // ------------------------------------------------- background always-on
@@ -210,7 +215,7 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
 
     @JavascriptInterface
     public boolean isAlwaysOn() {
-        return prefs.getBoolean(JarvisService.KEY_ALWAYS_ON, true);
+        return prefs.getBoolean(JarvisService.KEY_ALWAYS_ON, false);
     }
 
     /** Native mic loop: JS timers are frozen in the background, this is not. */
@@ -238,7 +243,7 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
             // misleading "Jarvis online" notification and its wake lock.
             if (muted) {
                 JarvisService.stop(activity);
-            } else if (prefs.getBoolean(JarvisService.KEY_ALWAYS_ON, true)) {
+            } else if (prefs.getBoolean(JarvisService.KEY_ALWAYS_ON, false)) {
                 JarvisService.start(activity);
             }
         } catch (Exception ignored) { }
@@ -856,7 +861,7 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
 
     @JavascriptInterface
     public String version() {
-        return "2.2.0";
+        return "2.2.1";
     }
 
     @JavascriptInterface

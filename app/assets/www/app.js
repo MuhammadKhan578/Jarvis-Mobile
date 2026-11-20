@@ -126,7 +126,7 @@ const Native = window.Android || {
   },
   executeTool: () => JSON.stringify({ ok: false, message: 'Native tools available nahi hain.' }),
   getStatus: () => JSON.stringify({ ok: true, data: { online: navigator.onLine, battery: -1, network: 'unknown' } }),
-  version: () => '2.2.0-web',
+  version: () => '2.2.1-web',
   deviceSummary: () => 'Browser',
   toast: (m) => window.jarvisToast && window.jarvisToast(m),
   vibrate: () => { },
@@ -171,10 +171,14 @@ const DEFAULTS = {
   voiceName: '',
   neuralVoice: true,
   neuralVoiceName: 'Charon',
-  handsFree: true,
-  alwaysOn: true,
+  // Safe default: one tap = one listen. Android's stock recognizer ends an
+  // idle session and would otherwise keep re-opening the mic (privacy-dot
+  // flashing and device-specific start/end chimes). Hands-free remains opt-in.
+  handsFree: false,
+  alwaysOn: false,
   wakeRequired: true,
-  onboarded: false
+  onboarded: false,
+  micSafetyVersion: 1
 };
 
 // Stronger models by default: the old lite-first list made answers shallow.
@@ -305,6 +309,15 @@ const LINES = {
 const saved = loadJSON(LS.settings, {});
 let settings = Object.assign({}, DEFAULTS, saved);
 settings.rate = clamp(Number(settings.rate) || 0.97, 0.7, 1.3);
+// v2.2.0 enabled a continuous native loop by default. Disable it once on
+// upgrade so existing users do not keep hearing recognition chimes or seeing
+// the green privacy indicator cycle. Users may explicitly opt back in.
+if (!Object.prototype.hasOwnProperty.call(saved, 'micSafetyVersion')) {
+  settings.handsFree = false;
+  settings.alwaysOn = false;
+  settings.micSafetyVersion = 1;
+  saveJSON(LS.settings, settings);
+}
 
 /* ------------------------------------------------------------ memory 2.0 */
 /* Structured long-term memory: categorised facts, pins, a rolling note about
@@ -572,11 +585,18 @@ let state = 'idle';           // idle | listening | thinking | speaking
 let busy = false;
 let pushToTalk = true;
 let appActive = true;
+/* True while the Jarvis screen is actually in front of the user. The wake word
+   is only mandatory in the background; in the foreground a plain "YouTube
+   kholo" must work without saying "Jarvis" first. */
+let appVisible = true;
 let torchOn = false;
 let speakSafety = null;
 let listenTimer = null;
 let listenSafety = null;
 let micStartPending = false;
+/* Consecutive silent/empty listens. Used for a gentle backoff so the recognizer
+   never restarts in a tight loop (the "prunk prunk" chime every second). */
+let emptyListens = 0;
 let voicesRetry = null;
 let toastTimer = null;
 let reqSeq = 0;
@@ -1527,9 +1547,10 @@ function toggleMic() {
 function applyBackground(on) {
   settings.alwaysOn = !!on;
   saveSettings();
+  const effective = bgMode() && !micMuted;
   try {
-    Native.setAlwaysOn(!!on);
-    Native.setAutoListen(bgMode() && !micMuted);
+    Native.setAlwaysOn(effective);
+    Native.setAutoListen(effective);
     Native.holdListening(!!micMuted);
   } catch (e) { }
   // The service holds the CPU awake; the screen itself may sleep.
@@ -1539,7 +1560,11 @@ function applyBackground(on) {
     clearTimeout(listenTimer);
     if (state === 'listening') setState('idle');
   } else if (settings.handsFree && state === 'idle' && !busy && !micMuted) {
-    startListening(false);
+    if (bgMode()) {
+      try { Native.setAutoListen(true); Native.holdListening(false); } catch (e) { }
+    } else {
+      startListening(false);
+    }
   }
 }
 
@@ -1676,7 +1701,15 @@ function startListening(fromUser) {
   setState('listening');
   armListenSafety(15000);
   let result = 'ok';
-  try { result = Native.startListening(); } catch (e) { result = 'error'; }
+  try {
+    // Never start a second session on top of a live one: that is what made the
+    // recognizer beep and flip on/off. If it is already listening, adopt it.
+    if (Native.isListening && Native.isListening()) {
+      result = 'ok';
+    } else {
+      result = Native.startListening();
+    }
+  } catch (e) { result = 'error'; }
   if (result === 'permission') {
     micStartPending = true;
     toast('Microphone permission allow karein.');
@@ -1804,7 +1837,7 @@ function updateConnState() {
     return;
   }
   el.textContent = online
-    ? (settings.alwaysOn !== false ? 'ONLINE · BG' : 'ONLINE')
+    ? (bgMode() ? 'ONLINE · BG' : 'ONLINE')
     : 'OFFLINE';
   el.classList.toggle('offline', !online);
 }
@@ -1887,11 +1920,13 @@ const APP_WORDS = [
   'telegram', 'tiktok', 'snapchat', 'spotify', 'netflix', 'maps', 'google maps', 'photos',
   'gallery', 'play store', 'phone', 'dialer', 'messages', 'contacts', 'calendar', 'keep',
   'files', 'file manager', 'settings', 'calculator', 'clock', 'alarm', 'camera', 'music',
-  'browser', 'internet', 'email', 'mail', 'video'
+  'browser', 'internet', 'email', 'mail', 'video', 'yt', 'tube', 'wp', 'fb', 'ig', 'insta'
 ];
 const APP_ALIAS = {
   video: 'youtube', music: 'music', browser: 'browser', internet: 'browser',
-  email: 'gmail', mail: 'gmail', alarm: 'clock', gallery: 'photos'
+  email: 'gmail', mail: 'gmail', alarm: 'clock', gallery: 'photos',
+  yt: 'youtube', tube: 'youtube', ytmusic: 'youtube', wp: 'whatsapp', wa: 'whatsapp',
+  fb: 'facebook', ig: 'instagram', insta: 'instagram', tele: 'telegram', tg: 'telegram'
 };
 
 /* ------------------------------------------- speech accuracy (STT repair)
@@ -1913,7 +1948,8 @@ const ROMAN_FIXES = {
   gmale: 'gmail', jmail: 'gmail', googal: 'google', gogle: 'google', googel: 'google',
   // common Roman-Urdu action words
   khol: 'kholo', kolo: 'kholo', colo: 'kholo', khulo: 'kholo', khola: 'kholo',
-  khole: 'kholo', khoolo: 'kholo', kholow: 'kholo',
+  khole: 'kholo', khoolo: 'kholo', kholow: 'kholo', polo: 'kholo', holo: 'kholo',
+  khlo: 'kholo', kholu: 'kholo',
   bnd: 'band', bund: 'band', baind: 'band',
   kro: 'karo', krdo: 'karo', kardo: 'karo', kero: 'karo',
   btao: 'batao', bta: 'batao', bataao: 'batao',
@@ -2027,7 +2063,7 @@ function replyFor(mode, en, roman, urdu) {
 }
 
 function tryLocalOpen(low) {
-  if (!/(kholo|khol do|khol|open|launch|chalao|start)/.test(low)) return false;
+  if (!/(kholo|khol do|khol|khulo|khul|open|launch|chalao|chalu|start)/.test(low)) return false;
   const parts = low.split(/\s+(?:aur|and|phir|then)\s+/);
   const found = [];
   for (const part of parts) {
@@ -2045,7 +2081,7 @@ function tryLocalOpen(low) {
   for (const word of APP_WORDS) {
     rest = rest.replace(new RegExp('\\b' + word.replace(/ /g, '\\s+') + '\\b', 'g'), ' ');
   }
-  rest = rest.replace(/\b(kholo|khol|open|launch|chalao|start|aur|and|phir|then|do|de|please|plz|jarvis|hey|hi|mera|meri|liye|ka|ki|ko|abhi|jaldi|se|kar|karo)\b/g, ' ')
+  rest = rest.replace(/\b(kholo|khol|khulo|khul|open|launch|chalao|chalu|start|aur|and|phir|then|do|de|please|plz|jarvis|hey|hi|mera|meri|liye|ka|ki|ko|abhi|jaldi|se|kar|karo|app|application|par|pe|pr|zara|thoda|ek|the)\b/g, ' ')
     .replace(/[^a-z0-9 ]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -3213,7 +3249,7 @@ async function mcpInitialize(name) {
   return mcpRpc(name, 'initialize', {
     protocolVersion: '2024-11-05',
     capabilities: {},
-    clientInfo: { name: 'jarvis-mobile', version: '2.2.0' }
+    clientInfo: { name: 'jarvis-mobile', version: '2.2.1' }
   });
 }
 async function mcpListTools(name) {
@@ -4240,18 +4276,82 @@ async function askBrain(userText) {
   throw last || new Error('Gemini se jawab nahi aaya.');
 }
 
+/** Pick the first readable string out of a JSON reply object. */
+function jsonText(v) {
+  if (v == null) return '';
+  if (typeof v === 'string') return v.trim();
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+  if (Array.isArray(v)) {
+    const parts = v.map(jsonText).filter(Boolean);
+    return parts.join(' ').trim();
+  }
+  if (typeof v === 'object') {
+    for (const k of ['roman', 'urdu', 'reply', 'answer', 'message', 'text', 'content']) {
+      const t = jsonText(v[k]);
+      if (t) return t;
+    }
+  }
+  return '';
+}
+
+/**
+ * Models occasionally answer with a JSON object instead of the two labelled
+ * lines ({"roman": "...", "urdu": "..."} or a tool-style {"message": "..."}).
+ * Parse it so raw braces/keys are never printed in the chat.
+ */
+function replyFromJson(body) {
+  const s = String(body || '').trim();
+  if (!/^[\[{]/.test(s)) return null;
+  let data;
+  try { data = JSON.parse(s); } catch (e) { return null; }
+  if (!data || typeof data !== 'object') return null;
+
+  const roman = jsonText(data.roman != null ? data.roman : (data.reply != null ? data.reply :
+    (data.answer != null ? data.answer : (data.message != null ? data.message : data.text))));
+  const urdu = jsonText(data.urdu != null ? data.urdu : data.urdu_text);
+  if (!roman && !urdu) {
+    const flat = jsonText(data);
+    if (!flat) return null;
+    return { roman: stripMarkdown(flat), urdu: '' };
+  }
+  return { roman: stripMarkdown(roman || urdu), urdu: stripMarkdown(urdu) };
+}
+
+/** Last-resort cleanup if a malformed JSON-ish string survives parsing. */
+function stripJsonish(s) {
+  const t = String(s || '').trim();
+  if (!/^[\[{]/.test(t)) return t;
+  const parsed = replyFromJson(t);
+  if (parsed) return parsed.roman || parsed.urdu || '';
+  return t
+    .replace(/^[\[{]+|[\]}]+$/g, ' ')
+    .replace(/"?\b(?:roman|urdu|reply|answer|message|text|content|ok|needs_user_action)\b"?\s*:\s*/gi, ' ')
+    .replace(/["{}\[\]]/g, ' ')
+    .replace(/\s*,\s*/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function parseReply(text) {
   let body = String(text || '').trim();
   let urdu = '';
-  const mu = body.match(/(?:^|\n)\s*URDU\s*:\s*([\s\S]*)$/i);
+
+  // Unwrap a fenced block first so labelled lines / JSON inside it still work.
+  const fence = body.match(/^```[a-z0-9_-]*\s*([\s\S]*?)\s*```$/i);
+  if (fence) body = fence[1].trim();
+
+  const asJson = replyFromJson(body);
+  if (asJson) return asJson;
+
+  const mu = body.match(/(?:^|\n)\s*(?:URDU|اردو)\s*[:：]\s*([\s\S]*)$/i);
   if (mu) {
     urdu = mu[1].trim();
     body = body.slice(0, mu.index).trim();
   }
-  let roman = body.replace(/^\s*ROMAN\s*:\s*/i, '').trim();
+  let roman = body.replace(/^\s*(?:ROMAN|ENGLISH|REPLY)\s*[:：]\s*/i, '').trim();
   if (!roman) roman = urdu;
-  roman = stripMarkdown(roman);
-  urdu = urdu.replace(/^\s*URDU\s*:\s*/i, '').trim();
+  roman = stripJsonish(stripMarkdown(roman));
+  urdu = stripJsonish(stripMarkdown(urdu.replace(/^\s*(?:URDU|اردو)\s*[:：]\s*/i, '').trim()));
   return { roman, urdu };
 }
 
@@ -4363,9 +4463,11 @@ function renderSettings() {
   if (bg) bg.checked = settings.alwaysOn !== false;
   const bgState = $('#bgState');
   if (bgState) {
-    bgState.textContent = settings.alwaysOn !== false
+    bgState.textContent = settings.alwaysOn !== false && settings.handsFree
       ? 'ON — app band karne ke baad bhi “Hey Jarvis” sunta rahega (notification rehti hai).'
-      : 'Off — sirf app khuli ho tab sunta hai.';
+      : (settings.alwaysOn !== false
+        ? 'Ready — background sunne ke liye hands-free bhi ON karein.'
+        : 'Off — sirf tap karne par sunta hai.');
   }
 
   const keyHint = $('#keyHint');
@@ -4434,7 +4536,7 @@ function renderSettings() {
 
   const about = $('#aboutText');
   if (about) {
-    let v = '2.2.0';
+    let v = '2.2.1';
     let d = 'Android';
     try { v = Native.version(); d = Native.deviceSummary(); } catch (e) { }
     about.textContent = 'Jarvis Mobile ' + v + ' · ' + d;
@@ -4949,6 +5051,7 @@ window.jarvisNative = {
     if (!Array.isArray(alts)) alts = [];
     const heard = chooseHeard(text || '', alts);
     let command = heard || '';
+    if (command) emptyListens = 0;
     transcript('“' + command + '”');
     try {
       Native.log('HEARD ' + JSON.stringify({ raw: text || '', chosen: command, alts: alts.slice(0, 8) }));
@@ -4962,12 +5065,20 @@ window.jarvisNative = {
       return;
     }
 
-    if (!pushToTalk && settings.wakeRequired) {
+    if (!pushToTalk && settings.wakeRequired && !appVisible) {
       const rest = wakeCommand(command);
       if (rest === null) {
-        // No wake word: stay quiet and listen again if hands-free.
-        setState('idle');
-        if (settings.handsFree) scheduleListen(500);
+        // Background chatter without the wake word: ignore it, but keep the
+        // native loop armed and the UI steady (no on/off blinking).
+        transcript('');
+        if (bgMode() && !micMuted) {
+          try { Native.holdListening(false); Native.setAutoListen(true); } catch (e) { }
+          if (state !== 'listening') setState('listening');
+          if (stateLabelEl) stateLabelEl.textContent = 'BOLIYE...';
+        } else {
+          setState('idle');
+          if (settings.handsFree) scheduleListen(700);
+        }
         return;
       }
       if (!rest) {
@@ -4995,11 +5106,23 @@ window.jarvisNative = {
     clearListenSafety();
     micStartPending = false;
     if (code === 7 || code === 6) {
-      // No match / silence: silent retry in hands-free, gentle note otherwise.
-      setState('idle');
+      // No match / silence. In background mode the native loop retries on its
+      // own: keep the orb steady and stay quiet instead of blinking and chiming.
       transcript('');
-      if (settings.handsFree) scheduleListen(700);
-      else toast('Kuch samajh nahi aaya — dobara bolein.');
+      if (bgMode() && !micMuted && !busy) {
+        try { Native.holdListening(false); Native.setAutoListen(true); } catch (e) { }
+        if (state !== 'listening') setState('listening');
+        if (stateLabelEl) stateLabelEl.textContent = 'BOLIYE...';
+        return;
+      }
+      emptyListens = Math.min(emptyListens + 1, 6);
+      setState('idle');
+      if (settings.handsFree) {
+        // 1.2s, 2.4s ... up to 8s: quiet, but still responsive to the wake word.
+        scheduleListen(Math.min(8000, 700 + emptyListens * 1200));
+      } else {
+        toast('Kuch samajh nahi aaya — dobara bolein.');
+      }
       return;
     }
     setState('idle');
@@ -5010,11 +5133,11 @@ window.jarvisNative = {
     }
     if (code === 2 || code === 3) {
       toast('Speech service ko internet nahi mil raha.');
-      if (settings.handsFree && appActive) scheduleListen(2500);
+      if (settings.handsFree && appActive) scheduleListen(4000);
       return;
     }
     toast(message || 'Speech error.');
-    if (settings.handsFree && appActive) scheduleListen(1500);
+    if (settings.handsFree && appActive) scheduleListen(3000);
   },
   onSpeechRms(rms) {
     if (state === 'listening' && orbEl) {
@@ -5056,6 +5179,7 @@ window.jarvisNative = {
     return false;
   },
   onAppPause() {
+    appVisible = false;
     // A user mute always wins over background mode: never re-arm the mic.
     if (micMuted) {
       appActive = true;
@@ -5084,6 +5208,7 @@ window.jarvisNative = {
     if (state !== 'idle') setState('idle');
   },
   onAppResume() {
+    appVisible = true;
     appActive = true;
     updateConnState();
     renderSettings();
@@ -5101,12 +5226,10 @@ window.jarvisNative = {
       try {
         Native.setAlwaysOn(true);
         Native.setAutoListen(true);
+        Native.holdListening(false);
       } catch (e) { }
-      if (settings.onboarded && state === 'idle' && !busy) {
-        try { Native.holdListening(false); Native.startListening(); } catch (e) { }
-        setState('listening');
-        armListenSafety(15000);
-      }
+      // The native loop owns the microphone: never force a second start here,
+      // otherwise the recognizer is started twice and beeps/toggles.
       return;
     }
     if (settings.handsFree && settings.onboarded && state === 'idle') scheduleListen(900);
@@ -5252,9 +5375,10 @@ function bindEvents() {
   $('#handsFreeToggle').addEventListener('change', e => {
     settings.handsFree = !!e.target.checked;
     saveSettings();
+    const effective = bgMode() && !micMuted;
     try {
-      Native.setAutoListen(bgMode());
-      Native.setAlwaysOn(settings.alwaysOn !== false);
+      Native.setAutoListen(effective);
+      Native.setAlwaysOn(effective);
     } catch (err) { }
     if (settings.handsFree) {
       toast('Hands-free ON. “Hey Jarvis” bolein.');
@@ -5264,7 +5388,11 @@ function bindEvents() {
       }
     } else {
       clearTimeout(listenTimer);
-      try { Native.setAutoListen(false); Native.cancelListening(); } catch (err) { }
+      try {
+        Native.setAutoListen(false);
+        Native.setAlwaysOn(false);
+        Native.cancelListening();
+      } catch (err) { }
       if (state === 'listening') setState('idle');
       toast('Hands-free OFF.');
     }
@@ -5273,7 +5401,9 @@ function bindEvents() {
   if (alwaysOn) alwaysOn.addEventListener('change', e => {
     applyBackground(!!e.target.checked);
     renderSettings();
-    toast(settings.alwaysOn ? 'Background mode ON — hamesha online.' : 'Background mode OFF.');
+    toast(settings.alwaysOn
+      ? (settings.handsFree ? 'Background mode ON — hamesha online.' : 'Background ready; hands-free bhi ON karein.')
+      : 'Background mode OFF.');
   });
   $('#wakeToggle').addEventListener('change', e => {
     settings.wakeRequired = !!e.target.checked;
@@ -5437,6 +5567,15 @@ function init() {
   bindEvents();
   applySettingsInitial();
   setState('idle');
+
+  // Synchronise native preferences even before onboarding/key setup. This
+  // immediately stops a v2.2.0 service that Android may have restored.
+  try {
+    const effective = bgMode() && !micMuted;
+    Native.setAlwaysOn(effective);
+    Native.setAutoListen(effective);
+    if (!effective) Native.cancelListening();
+  } catch (e) { }
 
   if (!settings.onboarded) {
     $('#onboard').classList.remove('hidden');

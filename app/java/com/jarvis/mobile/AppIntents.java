@@ -234,6 +234,14 @@ public final class AppIntents {
         }
         if (pkg != null && launchPackage(c, pkg)) return res(true, appLabel(c, pkg) + " khol diya.", false, null);
 
+        // YouTube is the most common "kholo" target; if the app itself cannot
+        // be launched (disabled/updated), open the mobile site instead of
+        // pretending nothing happened.
+        if ("com.google.android.youtube".equals(pkg)) {
+            Intent web = new Intent(Intent.ACTION_VIEW, Uri.parse("https://m.youtube.com"));
+            if (start(c, web)) return res(true, "YouTube browser mein khol diya.", false, null);
+        }
+
         // Unknown name: search installed apps by their visible label.
         String byLabel = findPackageByLabel(c, name);
         if (byLabel != null && launchPackage(c, byLabel)) {

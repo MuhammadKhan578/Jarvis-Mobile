@@ -135,26 +135,33 @@ public class SpeechEngine {
             recognizer.setRecognitionListener(new RecognitionListener() {
                 @Override public void onReadyForSpeech(Bundle params) {
                     listening = true;
-                    scheduleBeepRestore(350);
+                    // The start chime is over by now. Restore media shortly;
+                    // never leave the user's music muted for a whole session.
+                    scheduleBeepRestore(450);
                     android.util.Log.d("JarvisMobile", "STT ready");
                     if (listener != null) listener.onSpeechReady();
                 }
                 @Override public void onBeginningOfSpeech() {
                     armWatchdog(25000);
-                    restoreBeepStreams();
+                    forceRestoreBeepStreams();
                 }
                 @Override public void onRmsChanged(float rmsdB) {
                     if (listener != null) listener.onSpeechRms(rmsdB);
                 }
                 @Override public void onBufferReceived(byte[] buffer) { }
                 @Override public void onEndOfSpeech() {
-                    restoreBeepStreams();
+                    // Keep the streams muted for a moment AFTER the end callback:
+                    // Google plays its ending chime here, which is the second
+                    // half of the repeated "prunk prunk" users heard.
+                    muteBeepStreams();
+                    scheduleBeepRestore(500);
                     if (listener != null) listener.onSpeechEnd();
                 }
                 @Override public void onError(int error) {
                     listening = false;
                     cancelWatchdog();
-                    restoreBeepStreams();
+                    muteBeepStreams();
+                    scheduleBeepRestore(500);
                     if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
                         blockedByPermission = true;
                     }
@@ -167,7 +174,7 @@ public class SpeechEngine {
                         android.util.Log.d("JarvisMobile", "STT recover partial: " + lastPartial);
                         if (listener != null) listener.onSpeechFinal(lastPartial, all);
                         emptyStreak = 0;
-                        scheduleRestart(400);
+                        scheduleRestart(600);
                         return;
                     }
                     android.util.Log.w("JarvisMobile", "STT error " + error + " " + errorText(error));
@@ -177,13 +184,14 @@ public class SpeechEngine {
                         return;
                     }
                     scheduleRestart(error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY
-                            ? 1000
+                            ? 1200
                             : nextRestartDelay(false));
                 }
                 @Override public void onResults(Bundle results) {
                     listening = false;
                     cancelWatchdog();
-                    restoreBeepStreams();
+                    muteBeepStreams();
+                    scheduleBeepRestore(500);
                     ArrayList<String> all = collect(results);
                     if (all.isEmpty() && !lastPartial.isEmpty()) all.add(0, lastPartial);
                     String text = all.isEmpty() ? "" : all.get(0);
@@ -266,6 +274,10 @@ public class SpeechEngine {
     }
 
     private void restoreBeepStreams() {
+        forceRestoreBeepStreams();
+    }
+
+    private void forceRestoreBeepStreams() {
         if (!beepMuted) return;
         beepMuted = false;
         if (beepTimer != null) {
@@ -278,6 +290,11 @@ public class SpeechEngine {
                 if (!beepWasMuted[i]) audio.setStreamMute(beepStreams[i], false);
             } catch (Exception ignored) { }
         }
+    }
+
+    /** Called from the bridge right before TTS so Jarvis's own voice is audible. */
+    public void restoreAudioNow() {
+        main.post(this::forceRestoreBeepStreams);
     }
 
     private void scheduleBeepRestore(long delayMs) {
@@ -294,9 +311,10 @@ public class SpeechEngine {
             watchdog = null;
             if (!autoLoop || held || destroyed || !listening) return;
             android.util.Log.w("JarvisMobile", "STT watchdog: hung session, restarting");
-            restoreBeepStreams();
+            muteBeepStreams();
             try { if (recognizer != null) recognizer.cancel(); } catch (Exception ignored) { }
             listening = false;
+            scheduleBeepRestore(500);
             heard.clear();
             lastPartial = "";
             if (listener != null) {
@@ -317,12 +335,12 @@ public class SpeechEngine {
     private long nextRestartDelay(boolean heardSomething) {
         if (heardSomething) {
             emptyStreak = 0;
-            return 400;
+            return 600;
         }
-        emptyStreak = Math.min(emptyStreak + 1, 6);
-        // Keep the idle gap short: the chime is muted, and the user should not
-        // have to wait long before "Hey Jarvis" is heard again.
-        return Math.min(2000L, 700L + emptyStreak * 400L);
+        emptyStreak = Math.min(emptyStreak + 1, 5);
+        // Long enough that an idle room cannot turn into a chime every second,
+        // short enough that "Hey Jarvis" is still heard quickly.
+        return Math.min(5000L, 1000L + emptyStreak * 800L);
     }
 
     public boolean isRecognitionAvailable() {
@@ -351,10 +369,10 @@ public class SpeechEngine {
             }
             heard.clear();
             lastPartial = "";
-            if (autoLoop) {
-                // Native restarts produce a chime on every loop; silence it.
-                muteBeepStreams();
-            }
+            // Mute on every start (foreground JS starts too): the Google chime
+            // is what users described as "prunk prunk". It is restored when the
+            // session actually ends or when Jarvis needs to speak.
+            muteBeepStreams();
             try {
                 Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
                 intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
@@ -375,13 +393,15 @@ public class SpeechEngine {
                 }
                 listening = true;
                 recognizer.startListening(intent);
+                // Hard fallback: if the service never calls back, do not keep
+                // the user's media muted forever.
+                scheduleBeepRestore(1800);
                 if (autoLoop) {
-                    scheduleBeepRestore(2500);
                     armWatchdog(25000);
                 }
             } catch (Exception e) {
                 listening = false;
-                restoreBeepStreams();
+                forceRestoreBeepStreams();
                 cancelWatchdog();
                 if (listener != null) listener.onSpeechError(-1,
                         "Microphone start nahi ho saka: " + e.getMessage());
@@ -400,7 +420,7 @@ public class SpeechEngine {
         } else {
             cancelRestart();
             cancelWatchdog();
-            restoreBeepStreams();
+            forceRestoreBeepStreams();
         }
     }
 
@@ -448,8 +468,10 @@ public class SpeechEngine {
     /** Stops but still delivers the final result. */
     public void stop() {
         main.post(() -> {
-            restoreBeepStreams();
+            muteBeepStreams();
             try { if (recognizer != null && listening) recognizer.stopListening(); } catch (Exception ignored) { }
+            // Keep the ending chime muted, restore just after it.
+            scheduleBeepRestore(500);
         });
     }
 
@@ -458,11 +480,12 @@ public class SpeechEngine {
         main.post(() -> {
             cancelRestart();
             cancelWatchdog();
-            restoreBeepStreams();
+            muteBeepStreams();
             try { if (recognizer != null) recognizer.cancel(); } catch (Exception ignored) { }
             listening = false;
             heard.clear();
             lastPartial = "";
+            scheduleBeepRestore(500);
         });
     }
 
@@ -472,12 +495,12 @@ public class SpeechEngine {
         main.post(() -> {
             cancelRestart();
             cancelWatchdog();
-            restoreBeepStreams();
             try { if (recognizer != null) { recognizer.cancel(); recognizer.destroy(); } } catch (Exception ignored) { }
             recognizer = null;
             listening = false;
             heard.clear();
             lastPartial = "";
+            forceRestoreBeepStreams();
         });
     }
 

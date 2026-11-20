@@ -54,7 +54,9 @@ public class JarvisService extends Service {
     public static boolean isEnabled(Context context) {
         try {
             SharedPreferences p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-            return p.getBoolean(KEY_ALWAYS_ON, true);
+            // Continuous recognition is opt-in. Defaulting this to true made
+            // Android resurrect the service before the WebView settings loaded.
+            return p.getBoolean(KEY_ALWAYS_ON, false);
         } catch (Exception e) {
             return false;
         }
