@@ -634,6 +634,9 @@ const pendingRequests = {};
 let pcCallActive = false;
 let pcPaired = false;
 let pcLastFileId = '';
+// Only a REAL "needs confirmation" response from the PC may authorise the
+// bare "haan/confirm" save path. A stale lastDestination never counts.
+let pcPendingSave = null;
 let pcLinkSeq = 0;
 const pcLinkPending = {};
 const pendingPcSendPick = {};
@@ -2082,8 +2085,14 @@ function pcLinkSendFile(source) {
 }
 function pcLinkSave(fileId, destination, confirmed) {
   const dest = String(destination || pcLinkLoad().lastDestination || '');
-  return pcLinkInvoke('pcLinkSave', [fileId || pcLastFileId || '', dest, !!confirmed], 25000).then(r => {
+  const id = String(fileId || pcLastFileId || '');
+  return pcLinkInvoke('pcLinkSave', [id, dest, !!confirmed], 25000).then(r => {
     if (dest) saveJSON('jv.pcLink', Object.assign(pcLinkLoad(), { lastDestination: dest }));
+    if (r && (r.needs_user_action || r.confirmation_required) && !confirmed && dest) {
+      pcPendingSave = { fileId: id, destination: dest, at: Date.now() };
+    } else if (r && (r.ok || confirmed)) {
+      pcPendingSave = null;
+    }
     pcLinkPaint(r);
     return r;
   });
@@ -2760,13 +2769,14 @@ async function localCommand(text) {
     return true;
   }
   if (/^(?:yes|haan|han|confirm(?:\s+save)?|ok(?:ay)?\s+save|save\s+confirm\s+karo|overwrite\s+confirm\s+karo)[.!]?$/.test(low)) {
-    const cached = pcLinkLoad();
-    if (!cached.lastDestination) {
-      const msg = 'Pehle PC par destination batao, phir confirm karo.';
+    const pending = pcPendingSave;
+    if (!pending || !pending.destination || Date.now() - pending.at > 120000) {
+      pcPendingSave = null;
+      const msg = 'Koi pending PC save nahi hai. Pehle file upload karke PC par destination batao.';
       respond(msg, msg);
       return true;
     }
-    const r = await pcLinkSave('', cached.lastDestination, true);
+    const r = await pcLinkSave(pending.fileId, pending.destination, true);
     toolLog('pc_link confirm', r);
     respond(String(r.message || 'Confirm nahi hua.'), String(r.message || 'Confirm nahi hua.'));
     return true;
@@ -6212,7 +6222,7 @@ window.jarvisNative = {
     if (bgMode()) pushToTalk = false;
   },
   onSpeechEnd() {
-    if (!micMuted && state === 'listening') stateLabelEl.textContent = 'PROCESSING...';
+    if (!micMuted && state === 'listening' && stateLabelEl) stateLabelEl.textContent = 'PROCESSING...';
   },
   onSpeechError(code, message) {
     if (micMuted || state !== 'listening') return;
@@ -6706,7 +6716,8 @@ function testVoice() {
     ? 'Ji sir, yeh female voice hai. Main Jarvis hoon.'
     : 'Ji sir, yeh male voice hai. Main Jarvis hoon.';
   const urdu = 'جی سر، یہ میری آواز ہے۔ میں جاروس ہوں۔';
-  try { Native.speak(roman, urdu); } catch (e) { toast('Voice output fail hua.'); }
+  // Use speak() so the TTS state machine, safety timer and mic re-arm all run.
+  speak(roman, urdu);
 }
 
 /* ==================================================================== INIT */

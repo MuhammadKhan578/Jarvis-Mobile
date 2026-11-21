@@ -27,6 +27,14 @@ latency number is claimed; every change below is verifiable in the source.
   re-checks the OS-granted state.
 - **Stale "ASSISTANT 2.2" label (P3):** the visible settings title and prompt
   text now say "ASSISTANT TOOLS"; the version is consistently 2.3.3.
+- **Accidental re-save on bare "yes" (P2):** the confirm handler now requires a
+  real pending save created by the PC's `confirmation_required` response (valid
+  for 2 minutes). A leftover `lastDestination` can no longer trigger an old save.
+- **Voice test broke TTS state (P2):** `testVoice()` now calls `speak()` instead
+  of raw `Native.speak()`, so the safety timer, `state='speaking'` and mic re-arm
+  all work normally.
+- **Recognizer callback could crash early (P3):** `onSpeechEnd()` now null-checks
+  `stateLabelEl` before writing to it.
 
 ## Speed fixes
 
@@ -47,14 +55,14 @@ latency number is claimed; every change below is verifiable in the source.
 ## Verification
 
 - `node --check app/assets/www/app.js` — exit 0.
-- `tests/mobile_reel_test.ps1` — **178/178 checks pass**.
-- New offline checks cover all seven bug fixes above, the fast model order, no
+- `tests/mobile_reel_test.ps1` — **181/181 checks pass**.
+- New offline checks cover all ten bug fixes above, the fast model order, no
   thinking pass, 3-round cap, compact prompt, 10 s budget, fast TTS model,
   3 s fallback guard, every `Native.xxx()` ↔ Java bridge match and every
   `$('#id')` ↔ `index.html` match.
 - APK rebuilt with `build_apk.ps1`: version `2.3.3`, versionCode `17`, signed v2/v3,
   non-debuggable. SHA256:
-  `C09B61F78DB6CFD974BF0A980CCBBF729C8503D63AC5BA086AFC39CA3234A3C4`.
+  `9AF00D7D2BF2B34C30DB30F30D427A09C2F9AEA72DC6064A6235D44D7885E89A`.
 - No live API key was available here, so no measured first-word latency is claimed.
 
 ## Honest limits

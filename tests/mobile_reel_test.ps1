@@ -80,6 +80,9 @@ Check 'failed PC switch clears stale pairing' ($deviceText -match 'private stati
 Check 'confirmed save still requires a destination' ($deviceText -match 'if \(dest\.isEmpty\(\)\) \{' -and $deviceText -notmatch 'dest\.isEmpty\(\) && !confirmed')
 Check 'CALL_PHONE result reaches JS' ($mainText -match 'REQ_CALL_PHONE' -and $mainText -match 'bridge\.onPermissionResult\("call"')
 Check 'no stale ASSISTANT 2.2 in UI or prompt' ($htmlText -notmatch 'ASSISTANT 2\.2' -and $jsText -notmatch 'ASSISTANT 2\.2:')
+Check 'bare confirm needs a real pending PC save' ($jsText -match 'let pcPendingSave = null;' -and $jsText -match 'r\.confirmation_required' -and $jsText -notmatch 'const cached = pcLinkLoad\(\);[\s\S]{0,200}pcLinkSave\(')
+Check 'voice test uses the TTS state machine' ($jsText -match 'function testVoice\(\)' -and $jsText -match 'speak\(roman, urdu\);' -and $jsText -notmatch 'Native\.speak\(roman, urdu\)')
+Check 'onSpeechEnd guards stateLabelEl' ($jsText -match "state === 'listening' && stateLabelEl")
 
 # --- v2.3.3 speed fixes: real, offline-checkable regressions ----------------
 Check 'fast model list starts with flash-lite' ($jsText -match "const FAST_MODELS = \['gemini-3\.5-flash-lite'")
