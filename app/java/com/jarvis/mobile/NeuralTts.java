@@ -54,8 +54,10 @@ public class NeuralTts {
 
     private static final String TAG = "JarvisMobile";
 
-    /** Newest model first; every one of them speaks English and Urdu. */
+    /** Fast production TTS first (official Gemini 3.8 Flash-Lite TTS), then
+     *  higher-fidelity fallbacks. All names are from the official model list. */
     private static final String[] MODELS = {
+            "gemini-3.8-flash-lite-tts",
             "gemini-3.8-flash-tts",
             "gemini-3.1-flash-tts-preview",
             "gemini-2.5-flash-preview-tts"

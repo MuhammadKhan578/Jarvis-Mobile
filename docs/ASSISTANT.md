@@ -2,7 +2,7 @@
 
 Everything on this page is optional. Data stays in this app's local storage on
 the phone; tokens are sent only to the service you configure. Open
-**Settings > ASSISTANT 2.2** for the existing panels.
+**Settings > ASSISTANT TOOLS** for the existing panels.
 
 ## Personality and writing voice
 

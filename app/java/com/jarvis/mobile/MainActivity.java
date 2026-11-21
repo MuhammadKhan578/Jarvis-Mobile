@@ -194,6 +194,10 @@ public class MainActivity extends Activity {
             if (bridge != null) bridge.onPermissionResult("mic", granted);
         } else if (requestCode == REQ_CAMERA) {
             if (bridge != null) bridge.onPermissionResult("camera", granted);
+        } else if (requestCode == JsBridge.REQ_CALL_PHONE) {
+            boolean callGranted = granted && checkSelfPermission(android.Manifest.permission.CALL_PHONE)
+                    == android.content.pm.PackageManager.PERMISSION_GRANTED;
+            if (bridge != null) bridge.onPermissionResult("call", callGranted);
         }
     }
 

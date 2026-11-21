@@ -46,9 +46,8 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
     private static final String KEY_SEEDED = "key_seeded";
     private static final String KEY_NEURAL = "neural_voice";
     private static final String KEY_NEURAL_VOICE = "neural_voice_name";
-    /** Own request code; MainActivity only forwards mic/camera results, so the
-     *  call permission result is verified by re-checking the OS state below. */
-    private static final int REQ_CALL_PHONE = 1004;
+    /** MainActivity forwards this result; the OS state is re-checked as well. */
+    public static final int REQ_CALL_PHONE = 1004;
 
     private final Activity activity;
     private final WebView web;
@@ -62,7 +61,7 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
     private final java.util.Map<Integer, String> mediaPickRequests = new java.util.HashMap<>();
     private int nextMediaPickCode = 2000;
     private final Handler main = new Handler(Looper.getMainLooper());
-    private static final long NEURAL_START_TIMEOUT_MS = 4500;
+    private static final long NEURAL_START_TIMEOUT_MS = 3000;
     private boolean pendingListen = false;
     private String pendingRoman = "";
     private String pendingUrdu = "";
@@ -177,7 +176,7 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
             neuralActive = true;
             neural.speak(sentences, prefs.getString(KEY_NEURAL_VOICE, "Charon"), readKey());
             // Speed guard: if the neural voice has not started speaking in
-            // 4.5 s, stop waiting and use the instant Android voice.
+            // 3 s, stop waiting and use the instant Android voice.
             main.postDelayed(() -> {
                 if (seq != speechSeq || !neuralActive) return;
                 if (neural.hasPlayedAny()) return;
@@ -1108,7 +1107,7 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
 
     @JavascriptInterface
     public String version() {
-        return "2.3.2";
+        return "2.3.3";
     }
 
     @JavascriptInterface

@@ -190,6 +190,24 @@ public final class DeviceLink {
         return c;
     }
 
+    /** GET for the unauthenticated /link/status health endpoint. */
+    private static HttpURLConnection openGet(Context ctx, String path) throws Exception {
+        SharedPreferences p = prefs(ctx);
+        String host = p.getString(KEY_HOST, "");
+        int port = p.getInt(KEY_PORT, 0);
+        if (!isPrivateHost(host) || port < 1 || port > 65535) {
+            throw new IOException("Host private LAN IP ya .local nahi hai");
+        }
+        URL url = new URL("http://" + host + ":" + port + path);
+        HttpURLConnection c = (HttpURLConnection) url.openConnection();
+        c.setRequestMethod("GET");
+        c.setConnectTimeout(CONNECT_TIMEOUT_MS);
+        c.setReadTimeout(READ_TIMEOUT_MS);
+        c.setInstanceFollowRedirects(false);
+        c.setUseCaches(false);
+        return c;
+    }
+
     private static String readAll(InputStream is) throws IOException {
         if (is == null) return "";
         StringBuilder sb = new StringBuilder();
@@ -215,10 +233,17 @@ public final class DeviceLink {
         if (ctx == null) return json(false, "PC link context available nahi hai.", false);
         String host = normalizeHost(hostText);
         String c = code == null ? "" : code.trim();
+        SharedPreferences p = prefs(ctx);
+        String oldHost = p.getString(KEY_HOST, "");
+        int oldPort = p.getInt(KEY_PORT, 0);
+        final boolean switching = !oldHost.isEmpty()
+                && (!oldHost.equalsIgnoreCase(host) || oldPort != port);
         if (host.isEmpty() || port < 1 || port > 65535 || c.isEmpty()) {
+            if (switching) clearPairing(ctx);
             return remember(ctx, notPaired()).toString();
         }
         if (!isPrivateHost(host)) {
+            if (switching) clearPairing(ctx);
             return remember(ctx, need("Plain HTTP sirf private LAN IP (192.168.x.x, 10.x.x.x, 172.16-31.x.x) ya .local host ke liye allowed hai.")).toString();
         }
         HttpURLConnection conn = null;
@@ -232,6 +257,7 @@ public final class DeviceLink {
             String token = extractToken(server);
             boolean serverOk = server.has("ok") ? server.optBoolean("ok", false) : !token.isEmpty();
             if (http < 200 || http >= 300 || !serverOk || token.isEmpty()) {
+                if (switching) clearPairing(ctx);
                 JSONObject out = need("Pair nahi hua (HTTP " + http + "): " + server.optString("message", clip(server.toString())));
                 out.put("http_code", http);
                 out.put("host", host);
@@ -252,6 +278,7 @@ public final class DeviceLink {
             out.put("paired", true);
             return remember(ctx, out).toString();
         } catch (Exception e) {
+            if (switching) clearPairing(ctx);
             return remember(ctx, need("PC se connect nahi ho saka: " + friendly(e))).toString();
         } finally {
             if (conn != null) conn.disconnect();
@@ -285,7 +312,10 @@ public final class DeviceLink {
         return token.trim();
     }
 
-    /** LOCAL state only. Never invents a server status. */
+    /**
+     * Status button: reports local pairing AND performs a real GET to the PC's
+     * public /link/status endpoint. It never claims "online" without a 2xx OK.
+     */
     public static String status(Context ctx) {
         if (ctx == null) return json(false, "PC link context available nahi hai.", false);
         try {
@@ -300,26 +330,60 @@ public final class DeviceLink {
             o.put("host", host);
             o.put("port", port);
             o.put("has_token", isPaired);
-            o.put("server_status", "unknown");
+            o.put("server_status", isPaired ? "offline" : "unknown");
+
             String last = p.getString(KEY_LAST_RESULT, "");
             long ts = p.getLong(KEY_LAST_TS, 0L);
             if (!last.isEmpty()) {
                 try { o.put("last_result", new JSONObject(last)); }
                 catch (Exception e) { o.put("last_result", clip(last)); }
             }
-            if (ts > 0L) {
-                long age = Math.max(0L, System.currentTimeMillis() - ts);
-                o.put("last_checked_at", ts);
-                o.put("last_checked_age_ms", age);
-                if (age <= RECENT_MS) o.put("server_status", "checked_recently");
+
+            HttpURLConnection conn = null;
+            if (isPaired) {
+                long checked = System.currentTimeMillis();
+                try {
+                    conn = openGet(ctx, "/link/status");
+                    int http = conn.getResponseCode();
+                    InputStream stream = http >= 400 ? conn.getErrorStream() : conn.getInputStream();
+                    JSONObject server = parseOrError(readAll(stream));
+                    boolean serverOk = http >= 200 && http < 300 && server.optBoolean("ok", false);
+                    o.put("server_http_code", http);
+                    o.put("server_status", serverOk ? "online" : "offline");
+                    o.put("server", server);
+                    o.put("message", serverOk
+                            ? "PC " + host + ":" + port + " online hai aur jawab de raha hai."
+                            : "PC " + host + ":" + port + " se jawab nahi mila (HTTP " + http + ").");
+                } catch (Exception e) {
+                    o.put("server_status", "offline");
+                    o.put("server_error", friendly(e));
+                    o.put("message", "PC " + host + ":" + port + " tak pahunch nahi hua: " + friendly(e));
+                } finally {
+                    if (conn != null) conn.disconnect();
+                }
+                p.edit().putLong(KEY_LAST_TS, checked).apply();
+                o.put("last_checked_at", checked);
+                o.put("last_checked_age_ms", 0L);
+            } else {
+                o.put("message", "Abhi PC se paired nahi hai. PC se connect karo: IP, port aur code daalo.");
+                if (ts > 0L) {
+                    o.put("last_checked_at", ts);
+                    o.put("last_checked_age_ms", Math.max(0L, System.currentTimeMillis() - ts));
+                }
             }
-            o.put("message", isPaired
-                    ? "PC " + host + ":" + port + " se paired hai. Server status unknown hai; Status dabaiye."
-                    : "Abhi PC se paired nahi hai. PC se connect karo: IP, port aur code daalo.");
-            return o.toString();
+            return remember(ctx, o).toString();
         } catch (Exception e) {
             return json(false, "Status nahi mila: " + friendly(e), false);
         }
+    }
+
+    /** Used when switching PCs fails: never leave an old token authoritative. */
+    private static void clearPairing(Context ctx) {
+        prefs(ctx).edit()
+                .remove(KEY_HOST)
+                .remove(KEY_PORT)
+                .remove(KEY_TOKEN)
+                .apply();
     }
 
     /** Clears the stored token; host/port remain as a convenience. */
@@ -551,10 +615,12 @@ public final class DeviceLink {
             return remember(ctx, need("Pehle file upload karo ya file_id do.")).toString();
         }
         String dest = destination == null ? "" : destination.trim();
-        if (dest.isEmpty() && !confirmed) {
+        // Confirmation only authorises an overwrite; it never removes the need
+        // for a real destination. Always fall back to the last saved path.
+        if (dest.isEmpty()) {
             dest = prefs(ctx).getString(KEY_LAST_DEST, "");
         }
-        if (dest.isEmpty() && !confirmed) {
+        if (dest.isEmpty()) {
             return remember(ctx, need("PC par kahan save karna hai? Jaise 'PC par Downloads mein save karo'.")).toString();
         }
         if (!dest.isEmpty()) {

@@ -126,7 +126,7 @@ const Native = window.Android || {
   },
   executeTool: () => JSON.stringify({ ok: false, message: 'Native tools available nahi hain.' }),
   getStatus: () => JSON.stringify({ ok: true, data: { online: navigator.onLine, battery: -1, network: 'unknown' } }),
-  version: () => '2.3.2-web',
+  version: () => '2.3.3-web',
   deviceSummary: () => 'Browser',
   toast: (m) => window.jarvisToast && window.jarvisToast(m),
   vibrate: () => { },
@@ -204,8 +204,9 @@ const DEFAULTS = {
   micSafetyVersion: 1
 };
 
-// Stronger models by default: the old lite-first list made answers shallow.
-const FAST_MODELS = ['gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-flash'];
+// Speed-first fast mode: the lite model starts speaking much sooner; the
+// stronger models are kept as fallbacks. Smart mode still uses the big models.
+const FAST_MODELS = ['gemini-3.5-flash-lite', 'gemini-3.6-flash', 'gemini-3.8-flash'];
 const SMART_MODELS = ['gemini-3.8-flash', 'gemini-2.5-pro', 'gemini-3.1-pro-preview'];
 
 // Tools whose result message is already the final spoken answer. Directly
@@ -230,9 +231,12 @@ function isFastMode() {
   return settings.model !== 'smart';
 }
 
-/** Gemini 3 uses thinkingLevel, Gemini 2.5 uses a thinkingBudget. */
+/**
+ * generateContent (the endpoint this app uses) documents thinkingBudget for
+ * 2.5. thinkingLevel belongs to the newer Interactions API, so sending it here
+ * can trigger an INVALID_ARGUMENT retry; omit it for Gemini 3 instead.
+ */
 function thinkingConfigFor(model) {
-  if (/gemini-3/i.test(model)) return { thinkingLevel: 'low' };
   if (/gemini-2\.5/i.test(model)) return { thinkingBudget: 0 };
   return null;
 }
@@ -2232,16 +2236,22 @@ async function pcHandleIntercom(text) {
   addSystemLine('YOU → PC · ' + text);
   setState('thinking');
   try { Native.holdListening(true); } catch (e) { }
+  let spoke = false;
   try {
     const r = await pcLinkCommand(text);
     toolLog('pc_link command', r);
     const reply = String((r && (r.reply || r.message)) || 'PC ne jawab nahi diya.');
     addSystemLine('PC JARVIS → ' + reply);
     respond(reply, reply);
+    spoke = true; // finishSpeaking() re-arms the mic after this reply
   } finally {
-    try { Native.holdListening(false); } catch (e) { }
-    setState('idle');
-    schedulePcListen(500); // keep the Wi-Fi call alive for the next command
+    // Never force 'idle' here: respond() set 'speaking', and finishSpeaking()
+    // is the only place that may safely schedule the next intercom listen.
+    if (!spoke) {
+      try { Native.holdListening(false); } catch (e) { }
+      setState('idle');
+      schedulePcListen(500);
+    }
   }
 }
 
@@ -3752,7 +3762,7 @@ async function mcpInitialize(name) {
   return mcpRpc(name, 'initialize', {
     protocolVersion: '2024-11-05',
     capabilities: {},
-    clientInfo: { name: 'jarvis-mobile', version: '2.3.2' }
+    clientInfo: { name: 'jarvis-mobile', version: '2.3.3' }
   });
 }
 async function mcpListTools(name) {
@@ -5012,13 +5022,35 @@ function toolDeclarations() {
   ];
 }
 
-function buildSystemPrompt(userText) {
+function buildSystemPrompt(userText, fast) {
   const langMode = settings.langMode;
   const langLine = langMode === 'en'
     ? 'The user chose ENGLISH ONLY. Reply in English. The ROMAN line must be plain English and the URDU line repeats the same English.'
     : langMode === 'ur'
       ? 'The user chose ROMAN URDU. Reply in natural Pakistani Roman Urdu (simple everyday words, like a friend talking), and give the same in Urdu script.'
       : 'Match the user: English input -> English reply; Roman Urdu / Urdu / Hindi input -> natural Pakistani Roman Urdu reply. The ROMAN line must sound like a real Pakistani person talking casually, never like an English sentence with Urdu words pasted in.';
+
+  // A much smaller prompt for fast mode: fewer input tokens means the first
+  // spoken word arrives sooner. Smart mode keeps the full capability prompt.
+  if (fast) {
+    return [
+      "You are J.A.R.V.I.S. ('Jarvis'), the user's personal Android assistant. Call the user 'sir'. Be warm, brief, honest and quick-witted.",
+      'Use the available tools immediately when an action is needed. Never claim a task is done unless its tool returned ok:true; if the user must tap something, say exactly what.',
+      'You control this phone, not the PC. No incoming-call interception and no call recording exist.',
+      'For lasting facts or "yaad rakho", call remember or recall_memory. For lights/fan/AC/TV use smart_home. For news use news_brief. Do not invent tool results.',
+      'Automation may be off: ui_click, ui_type, ui_dump and full install then need the user to enable Phone automation. Say exactly what to enable.',
+      'Answer in 1-3 short spoken sentences. No lists, markdown, emojis or stage directions.',
+      'LANGUAGE: ' + langLine,
+      'MEMORY: ' + memContext(String(userText || '').slice(0, 300)),
+      'NOW: ' + new Date().toLocaleString('en-PK', {
+        weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+        hour: 'numeric', minute: '2-digit'
+      }),
+      'OUTPUT: exactly two lines, nothing else:',
+      'ROMAN: <reply in the language rule above>',
+      'URDU: <the same reply in Urdu script>'
+    ].join('\n');
+  }
 
   // Only relevant, recent and pinned memories go into the prompt. This keeps
   // the request small (faster replies) while still recalling the right detail.
@@ -5049,7 +5081,7 @@ function buildSystemPrompt(userText) {
       : 'OFF — ui_click / ui_type / ui_dump / system_action and full install will ask the user to enable it. App opens, Play Store search and normal tools still work.'),
     'MEMORY: you have real long-term memory on this phone. When the user shares something lasting, or says "yaad rakho" / "never forget", call remember with a short English fact, a category and importance (pin:true for a permanent detail). When asked what you remember about a topic, call recall_memory FIRST; never say you forgot before checking. Use forget_memory when the user asks you to forget something. Answer naturally and never read the whole list out.',
     'PERSONALITY PROFILE:\n' + personaPromptBlock(),
-    'ASSISTANT 2.2: persona, calendar (local + phone), routine, workspace (GitHub/Slack/Notion/Linear/Jira with local tokens), mcp (remote streamable HTTP), read_page, summarize_text and dictation are available. Use workspace list/summarize before writing; writes need the user to confirm.',
+    'ASSISTANT TOOLS: persona, calendar (local + phone), routine, workspace (GitHub/Slack/Notion/Linear/Jira with local tokens), mcp (remote streamable HTTP), read_page, summarize_text and dictation are available. Use workspace list/summarize before writing; writes need the user to confirm.',
     'REEL FEATURES: iss_operation gives real ISS position and a phone map; video_operation and image_operation pick/edit local media and produce real saved outputs; commerce_operation manages food/grocery lists and opens services; analytics_operation checks public views/comments; notification_operation sends ntfy alerts when the user has configured a topic; phone_agent_operation prepares a call hand-off; auto_call fires a real ACTION_CALL only after explicit opt-in and permission; overlay_highlight/overlay_hide control a real overlay. Never claim an order, purchase, call, post, highlight, or remote alert happened unless the tool confirms it. There is no incoming-call interception, call recording or transcript.',
     'DICTATION: dictation action=start types speech into other apps; "scratch that", "capitalize that", "new paragraph", "comma" edit the dictation buffer. It needs Phone automation for direct typing, otherwise text goes to the clipboard.',
     'ROUTINES: routines run only while Jarvis is open or its background service is alive; never promise they run after the app is killed.',
@@ -5231,10 +5263,13 @@ async function runTool(name, args) {
 async function toolLoop(model, baseContents, systemPrompt, simpleRequest) {
   const contents = baseContents.map(c => JSON.parse(JSON.stringify(c)));
   const fast = isFastMode();
-  const requestTimeout = fast ? 8500 : 12000;
-  const maxOutputTokens = fast ? 500 : 900;
-  let useThinking = fast;
-  for (let round = 0; round < 8; round++) {
+  // Fast mode: no reasoning pass, fewer tokens and at most three rounds.
+  // Each round is a real network call, so this is the main latency saver.
+  const requestTimeout = fast ? 6000 : 12000;
+  const maxOutputTokens = fast ? 350 : 900;
+  let useThinking = !fast;
+  const maxRounds = fast ? 3 : 8;
+  for (let round = 0; round < maxRounds; round++) {
     const generationConfig = {
       temperature: fast ? 0.45 : 0.55,
       maxOutputTokens
@@ -5314,7 +5349,7 @@ async function askBrain(userText) {
   if (!contents.length || contents[contents.length - 1].role !== 'user') {
     contents.push({ role: 'user', parts: [{ text: userText }] });
   }
-  const systemPrompt = buildSystemPrompt(userText);
+  const systemPrompt = buildSystemPrompt(userText, fast);
   const models = settings.model === 'smart' ? SMART_MODELS : FAST_MODELS;
   let ordered = models;
   try {
@@ -5325,7 +5360,7 @@ async function askBrain(userText) {
   } catch (e) { }
   const simpleRequest = isSimpleActionText(userText);
   const started = Date.now();
-  const budget = fast ? 15000 : 18000;
+  const budget = fast ? 10000 : 18000;
   let last = null;
 
   for (const model of ordered) {
@@ -5604,7 +5639,7 @@ function renderSettings() {
 
   const about = $('#aboutText');
   if (about) {
-    let v = '2.3.2';
+    let v = '2.3.3';
     let d = 'Android';
     try { v = Native.version(); d = Native.deviceSummary(); } catch (e) { }
     about.textContent = 'Jarvis Mobile ' + v + ' · ' + d

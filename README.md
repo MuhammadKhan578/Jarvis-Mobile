@@ -112,7 +112,7 @@ performing a task. Turn it off any time in Android Accessibility settings.
 
 ## Assistant 2.2 (personality, calendar, routines, work, MCP, dictation)
 
-Open **Settings > ASSISTANT 2.2** for the new panels. Everything here is
+Open **Settings > ASSISTANT TOOLS** for the new panels. Everything here is
 optional and stores its data in this app's local storage on the phone.
 
 - **Personality** — pick Jarvis, Professional, Friendly, Concise, Mentor,
@@ -196,7 +196,7 @@ powershell -ExecutionPolicy Bypass -File .\build_apk.ps1 `
   -Sdk "C:\Android\Sdk" -Jdk "C:\Program Files\Java\jdk-17"
 ```
 
-Output: `JarvisMobile.apk` in this folder. Version 2.3.2 (versionCode 16).
+Output: `JarvisMobile.apk` in this folder. Version 2.3.3 (versionCode 17).
 
 On the first build the script creates a local development keystore at
 `keystore/jarvis.keystore` with a random password saved in

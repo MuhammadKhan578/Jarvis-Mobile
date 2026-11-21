@@ -9,6 +9,9 @@ $overlay = Join-Path $app 'java\com\jarvis\mobile\OverlayGuide.java'
 $docs = Join-Path $root 'docs\CALL_AND_OVERLAY.md'
 $pcDocs = Join-Path $root 'docs\PC_LINK.md'
 $deviceLink = Join-Path $app 'java\com\jarvis\mobile\DeviceLink.java'
+$neural = Join-Path $app 'java\com\jarvis\mobile\NeuralTts.java'
+$ttsEngine = Join-Path $app 'java\com\jarvis\mobile\TtsEngine.java'
+$mainActivity = Join-Path $app 'java\com\jarvis\mobile\MainActivity.java'
 $html = Join-Path $app 'assets\www\index.html'
 $build = Join-Path $root 'build_apk.ps1'
 $apk = Join-Path $root 'JarvisMobile.apk'
@@ -34,12 +37,59 @@ $overlayText = if (Test-Path $overlay) { Get-Content $overlay -Raw } else { '' }
 $docsText = if (Test-Path $docs) { Get-Content $docs -Raw } else { '' }
 $pcDocsText = if (Test-Path $pcDocs) { Get-Content $pcDocs -Raw } else { '' }
 $deviceText = if (Test-Path $deviceLink) { Get-Content $deviceLink -Raw } else { '' }
+$neuralText = if (Test-Path $neural) { Get-Content $neural -Raw } else { '' }
+$ttsText = if (Test-Path $ttsEngine) { Get-Content $ttsEngine -Raw } else { '' }
+$mainText = if (Test-Path $mainActivity) { Get-Content $mainActivity -Raw } else { '' }
 $htmlText = if (Test-Path $html) { Get-Content $html -Raw } else { '' }
 
-Check 'app.js version' ($jsText -match "2\.3\.2")
-Check 'manifest version' ($manifestText -match 'versionCode="16"' -and $manifestText -match 'versionName="2\.3\.2"')
-Check 'build script version' ($buildText -match '"2\.3\.2"' -and $buildText -match '\$VersionCode = 16')
+Check 'app.js version' ($jsText -match "2\.3\.3")
+Check 'manifest version' ($manifestText -match 'versionCode="17"' -and $manifestText -match 'versionName="2\.3\.3"')
+Check 'build script version' ($buildText -match '"2\.3\.3"' -and $buildText -match '\$VersionCode = 17')
 Check 'release APK not debuggable in manifest' ($manifestText -notmatch 'android:debuggable="true"')
+
+# --- Cross-file contract checks: JS calls vs Java bridge and HTML IDs -------
+$missingBridge = @()
+foreach ($m in [regex]::Matches($jsText, 'Native\.([A-Za-z_][A-Za-z0-9_]*)\s*\(')) {
+  $name = $m.Groups[1].Value
+  if ($name -eq 'onTtsDone') { continue }  # Java calls JS, not the other way round
+  if ($bridgeText -notmatch ("@JavascriptInterface\s+public\s+[\w<>\[\],\s]+\s+" + [regex]::Escape($name) + "\s*\(")) {
+    $missingBridge += $name
+  }
+}
+Check 'all JS Native calls exist in JsBridge' ($missingBridge.Count -eq 0)
+if ($missingBridge.Count) { Write-Host "MISSING BRIDGE: $($missingBridge -join ', ')" -ForegroundColor Red }
+
+$missingIds = @()
+foreach ($m in [regex]::Matches($jsText, '(?<!\$)\$\([''"]#?([A-Za-z][A-Za-z0-9_-]*)[''"]')) {
+  $id = $m.Groups[1].Value
+  if ($htmlText -notmatch ("id=[\x22\x27]" + [regex]::Escape($id) + "[\x22\x27]")) { $missingIds += $id }
+}
+foreach ($m in [regex]::Matches($jsText, 'getElementById\([''"]#?([A-Za-z][A-Za-z0-9_-]*)[''"]')) {
+  $id = $m.Groups[1].Value
+  if ($htmlText -notmatch ("id=[\x22\x27]" + [regex]::Escape($id) + "[\x22\x27]")) { $missingIds += $id }
+}
+$missingIds = $missingIds | Select-Object -Unique
+Check 'all JS element IDs exist in index.html' ($missingIds.Count -eq 0)
+if ($missingIds.Count) { Write-Host "MISSING IDS: $($missingIds -join ', ')" -ForegroundColor Red }
+
+# --- v2.3.3 real bug fixes --------------------------------------------------
+Check 'intercom lets finishSpeaking re-arm the mic' ($jsText -match 'let spoke = false;' -and $jsText -match 'spoke = true; // finishSpeaking\(\)' -and $jsText -notmatch 'schedulePcListen\(500\); // keep the Wi-Fi call alive')
+Check 'interrupted TTS is not reported as done' ($ttsText -match '@Override public void onStop' -and $ttsText -notmatch '(?s)onStop\([\s\S]{0,300}?listener\.onTtsDone' -and $ttsText -match 'lastUtteranceId = ""; // a stopped utterance')
+Check 'PC status performs a live health GET' ($deviceText -match 'openGet\(ctx, "/link/status"\)' -and $deviceText -match 'server_status", serverOk \? "online" : "offline"')
+Check 'failed PC switch clears stale pairing' ($deviceText -match 'private static void clearPairing' -and ([regex]::Matches($deviceText, 'clearPairing\(ctx\)').Count -ge 4))
+Check 'confirmed save still requires a destination' ($deviceText -match 'if \(dest\.isEmpty\(\)\) \{' -and $deviceText -notmatch 'dest\.isEmpty\(\) && !confirmed')
+Check 'CALL_PHONE result reaches JS' ($mainText -match 'REQ_CALL_PHONE' -and $mainText -match 'bridge\.onPermissionResult\("call"')
+Check 'no stale ASSISTANT 2.2 in UI or prompt' ($htmlText -notmatch 'ASSISTANT 2\.2' -and $jsText -notmatch 'ASSISTANT 2\.2:')
+
+# --- v2.3.3 speed fixes: real, offline-checkable regressions ----------------
+Check 'fast model list starts with flash-lite' ($jsText -match "const FAST_MODELS = \['gemini-3\.5-flash-lite'")
+Check 'fast tool loop disables thinking' ($jsText -match 'let useThinking = !fast;')
+Check 'fast tool loop caps rounds at three' ($jsText -match 'const maxRounds = fast \? 3 : 8;')
+Check 'fast prompt is compact' ($jsText -match 'function buildSystemPrompt\(userText, fast\)' -and $jsText -match 'if \(fast\) \{')
+Check 'generateContent does not send thinkingLevel' ($jsText -notmatch "thinkingLevel:")
+Check 'fast LLM budget is 10s' ($jsText -match 'const budget = fast \? 10000 : 18000;')
+Check 'neural TTS starts with flash-lite TTS' ($neuralText -match '"gemini-3\.8-flash-lite-tts"')
+Check 'neural fallback guard is 3s' ($bridgeText -match 'NEURAL_START_TIMEOUT_MS = 3000')
 
 # Existing reel tools (unchanged).
 $tools = @('iss_operation', 'image_operation', 'video_operation', 'commerce_operation',

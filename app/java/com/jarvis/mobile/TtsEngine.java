@@ -93,9 +93,10 @@ public class TtsEngine implements TextToSpeech.OnInitListener {
                     }
                 }
                 @Override public void onStop(String utteranceId, boolean interrupted) {
-                    if (utteranceId != null && utteranceId.equals(lastUtteranceId)) {
-                        main.post(() -> { if (listener != null) listener.onTtsDone(); });
-                    }
+                    // An interrupted utterance is NOT a finished reply. Reporting
+                    // onTtsDone here used to release the mic before the neural
+                    // replacement audio started (or after a user stop command).
+                    // stop() clears lastUtteranceId, so this is deliberately a no-op.
                 }
             });
             ready = true;
@@ -308,6 +309,7 @@ public class TtsEngine implements TextToSpeech.OnInitListener {
 
     public void stop() {
         main.post(() -> {
+            lastUtteranceId = ""; // a stopped utterance must never call onDone/onTtsDone
             try { if (tts != null) tts.stop(); } catch (Exception ignored) { }
         });
     }
