@@ -53,6 +53,10 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
     private final NeuralTts neural;
     private final SpeechEngine speech;
     private final SharedPreferences prefs;
+    private final MediaTools media;
+    /** Maps picker request codes (>= 2000) to the JS request id. */
+    private final java.util.Map<Integer, String> mediaPickRequests = new java.util.HashMap<>();
+    private int nextMediaPickCode = 2000;
     private final Handler main = new Handler(Looper.getMainLooper());
     private static final long NEURAL_START_TIMEOUT_MS = 4500;
     private boolean pendingListen = false;
@@ -70,6 +74,7 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
         this.tts = tts;
         this.speech = speech;
         this.prefs = activity.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        this.media = new MediaTools(activity, js -> callJs(js));
         this.tts.setListener(this);
         this.neural = new NeuralTts(activity);
         this.neural.setListener(this);
@@ -840,6 +845,73 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
         return sb.toString();
     }
 
+    // --------------------------------------------------------------- media
+
+    /** Picks image/video/any content; result arrives via jarvisMediaPicked(id, json). */
+    @JavascriptInterface
+    public void pickMedia(String kind, String requestId) {
+        final String id = requestId == null ? "" : requestId;
+        final int code;
+        synchronized (mediaPickRequests) {
+            int start = nextMediaPickCode;
+            int chosen = nextMediaPickCode;
+            do {
+                chosen = nextMediaPickCode++;
+                if (nextMediaPickCode > 2999) nextMediaPickCode = 2000;
+            } while (mediaPickRequests.containsKey(chosen) && nextMediaPickCode != start);
+            mediaPickRequests.put(chosen, id);
+            code = chosen;
+        }
+        try { media.pickMedia(kind, code, id); }
+        catch (Throwable t) {
+            callJs("window.jarvisMediaPicked(" + q(id) + "," + q(
+                    "{\"ok\":false,\"message\":\"Media picker unavailable.\",\"path\":\"\","
+                            + "\"uri\":\"\",\"name\":\"\",\"kind\":\"any\",\"size\":0}") + ")");
+        }
+    }
+
+    /** Called by MainActivity.onActivityResult for all activity results. */
+    public void onMediaResult(int requestCode, int resultCode, Intent data) {
+        final String id;
+        synchronized (mediaPickRequests) { id = mediaPickRequests.remove(requestCode); }
+        if (id == null) return;
+        try { media.onPickResult(requestCode, resultCode, data, id); }
+        catch (Throwable ignored) { }
+    }
+
+    @JavascriptInterface
+    public String editPhoto(String path, String action, String optionsJson) {
+        try { return media.editPhoto(path, action, optionsJson); }
+        catch (Throwable t) {
+            return "{\"ok\":false,\"message\":\"Photo edit unavailable.\",\"output\":\"\","
+                    + "\"width\":0,\"height\":0,\"bytes\":0}";
+        }
+    }
+
+    /** Trims an MP4; result arrives via jarvisMediaDone(id, json). */
+    @JavascriptInterface
+    public void trimVideo(String path, double startSec, double endSec, String requestId) {
+        final String id = requestId == null ? "" : requestId;
+        try { media.trimVideo(path, startSec, endSec, id); }
+        catch (Throwable t) {
+            callJs("window.jarvisMediaDone(" + q(id) + "," + q(
+                    "{\"ok\":false,\"message\":\"Video trim unavailable.\",\"output\":\"\","
+                            + "\"bytes\":0,\"duration\":0}") + ")");
+        }
+    }
+
+    @JavascriptInterface
+    public String openMedia(String pathOrUri, String kind) {
+        try { return media.openMedia(pathOrUri, kind); }
+        catch (Throwable t) { return "{\"ok\":false,\"message\":\"Media open unavailable.\"}"; }
+    }
+
+    @JavascriptInterface
+    public String mediaSelfTest() {
+        try { return media.mediaSelfTest(); }
+        catch (Throwable t) { return "{\"ok\":false,\"message\":\"Media self-test unavailable.\"}"; }
+    }
+
     // --------------------------------------------------------------- tools
 
     @JavascriptInterface
@@ -861,7 +933,7 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
 
     @JavascriptInterface
     public String version() {
-        return "2.2.1";
+        return "2.3.0";
     }
 
     @JavascriptInterface

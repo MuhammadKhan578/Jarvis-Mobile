@@ -8,6 +8,13 @@ APK with the Android SDK command-line tools.
 
 ## Features
 
+- **Reel feature pack (v2.3.0)** — real ISS lookup with a phone map; native
+  photo picking and real local edits (crop, resize, rotate, flip, grayscale,
+  sepia, blur, text) that never overwrite the original; real MP4 trim using
+  Android's media APIs; an honest video/photo editor hand-off; local grocery
+  lists and food/grocery service hand-offs; public analytics checks; ntfy
+  alerts after confirmation; a confirmation-gated call hand-off; and an honest
+  mobile equivalent for Steam/Epic commands. No desktop-only action is faked.
 - **Bug-fix release (v2.2.1)** — model JSON is always converted into a clean
   chat reply, foreground commands such as “YouTube kholo” work without a wake
   word and always report the real launch result, and microphone restart chimes
@@ -181,7 +188,7 @@ powershell -ExecutionPolicy Bypass -File .\build_apk.ps1 `
   -Sdk "C:\Android\Sdk" -Jdk "C:\Program Files\Java\jdk-17"
 ```
 
-Output: `JarvisMobile.apk` in this folder. Version 2.2.1 (versionCode 13).
+Output: `JarvisMobile.apk` in this folder. Version 2.3.0 (versionCode 14).
 
 On the first build the script creates a local development keystore at
 `keystore/jarvis.keystore` with a random password saved in
@@ -206,6 +213,17 @@ Allow **Install unknown apps** for the file manager if Android asks.
 
 The package name is `com.jarvis.mobile`.
 
+## Test the build
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tests\mobile_reel_test.ps1
+```
+
+This checks version consistency, all eight reel tools and their routes, native
+media bridge methods, JavaScript syntax and the APK signature. On a connected
+device or emulator, `window.__jarvisSelfTest()` also reports
+`reelMedia` and a synthetic `reelMediaSelfTest`.
+
 ## Project layout
 
 | Path | Purpose |
@@ -214,7 +232,9 @@ The package name is `com.jarvis.mobile`.
 | `app/assets/www/` | The HUD: `index.html`, `app.js`, `style.css` |
 | `app/java/com/jarvis/mobile/` | Native bridge, speech, neural TTS, automation, intents |
 | `app/java/com/jarvis/mobile/JarvisService.java` | Foreground service for always-on background listening |
+| `app/java/com/jarvis/mobile/MediaTools.java` | Native photo/video picker, real edits and media hand-off |
 | `app/res/xml/accessibility_service_config.xml` | Phone automation service config |
+| `tests/mobile_reel_test.ps1` | Static/version/signature checks for the reel build |
 | `build_apk.ps1` | Builds and signs the APK without Gradle |
 | `install_on_phone.ps1` | Installs the APK over USB |
 | `components/` | Optional component checker and notes |
@@ -226,9 +246,11 @@ The package name is `com.jarvis.mobile`.
 - Smart-home state and an optional Home Assistant token stay in that local
   storage; the token is sent only to the Home Assistant URL you enter.
 - Notification Access is optional and used only for Gmail summaries.
-- Work-tool tokens, calendar events, routines, personality samples and MCP
-  server settings stay in the WebView's local storage. Tokens are sent only to
-  the service you configured.
+- Work-tool tokens, calendar events, routines, personality samples, MCP server
+  settings, grocery lists, analytics targets and ntfy topics stay in the
+  WebView's local storage. Tokens are sent only to the service you configured.
+- Picked and edited media stays in the app's own cache/external-files folders and
+  is never uploaded by Jarvis.
 - The accessibility service runs only while a Jarvis automation task is active.
 - This repository contains no API keys, keystores, logs, or personal data.
 

@@ -126,7 +126,7 @@ const Native = window.Android || {
   },
   executeTool: () => JSON.stringify({ ok: false, message: 'Native tools available nahi hain.' }),
   getStatus: () => JSON.stringify({ ok: true, data: { online: navigator.onLine, battery: -1, network: 'unknown' } }),
-  version: () => '2.2.1-web',
+  version: () => '2.3.0-web',
   deviceSummary: () => 'Browser',
   toast: (m) => window.jarvisToast && window.jarvisToast(m),
   vibrate: () => { },
@@ -2463,6 +2463,33 @@ async function localCommand(text) {
     return true;
   }
 
+  if (/^(iss|international space station)\b/.test(low) || /\b(space station|iss)\s+(kahan|kidhar|where|status|track|dikhao|batao)\b/.test(low)) {
+    const r = await reelIssOperation({ action: /map|track|dikhao/.test(low) ? 'map' : 'status' });
+    respond(r.message, r.message);
+    return true;
+  }
+  let groceryAdd = low.match(/^(?:grocery|shopping)\s+list\s+mein\s+(.+?)\s+(?:daal|daalo|add)\b/) ||
+    low.match(/^(?:add|daal|daalo)\s+(.+?)\s+(?:to|mein)\s+(?:grocery|shopping)\s+list\b/);
+  if (groceryAdd) {
+    const r = reelCommerceOperation({ action: 'add', item: groceryAdd[1] });
+    respond(r.message, r.message);
+    return true;
+  }
+  if (/^(grocery|shopping)\s+list\b/.test(low) || /\b(grocery|shopping list)\s+(dikhao|batao|show|list)\b/.test(low)) {
+    const r = reelCommerceOperation({ action: 'list' });
+    respond(r.message, r.message);
+    return true;
+  }
+  if (/^(photo|image)\s+(pick|select|chuno|chun)\b/.test(low)) {
+    const r = await reelImageOperation({ action: 'pick' });
+    respond(r.message, r.message);
+    return true;
+  }
+  if (/^(video)\s+(pick|select|chuno|chun)\b/.test(low)) {
+    const r = await reelVideoOperation({ action: 'pick' });
+    respond(r.message, r.message);
+    return true;
+  }
   if (tryLocalOpen(low)) return true;
   return false;
 }
@@ -3249,7 +3276,7 @@ async function mcpInitialize(name) {
   return mcpRpc(name, 'initialize', {
     protocolVersion: '2024-11-05',
     capabilities: {},
-    clientInfo: { name: 'jarvis-mobile', version: '2.2.1' }
+    clientInfo: { name: 'jarvis-mobile', version: '2.3.0' }
   });
 }
 async function mcpListTools(name) {
@@ -3517,6 +3544,370 @@ function dictationHandle(phrase) {
   setState('idle');
   if (settings.handsFree) scheduleListen(300);
   return true;
+}
+
+/* ======================================================== REEL MEDIA TOOLS */
+/* These are the phone-compatible versions of the capabilities shown in the
+   Jarvis reels. They use real Android media APIs and real network endpoints;
+   anything that needs a login or a desktop-only program is reported honestly. */
+const pendingMediaPick = {};
+const pendingMediaTrim = {};
+let mediaSeq = 0;
+
+window.jarvisMediaPicked = function (id, json) {
+  const p = pendingMediaPick[id];
+  if (!p) return;
+  delete pendingMediaPick[id];
+  clearTimeout(p.timer);
+  let result;
+  try { result = JSON.parse(json); } catch (e) { result = { ok: false, message: String(json) }; }
+  p.resolve(result && typeof result === 'object' ? result : { ok: false, message: 'Bad media result' });
+};
+
+window.jarvisMediaDone = function (id, json) {
+  const p = pendingMediaTrim[id];
+  if (!p) return;
+  delete pendingMediaTrim[id];
+  clearTimeout(p.timer);
+  let result;
+  try { result = JSON.parse(json); } catch (e) { result = { ok: false, message: String(json) }; }
+  p.resolve(result && typeof result === 'object' ? result : { ok: false, message: 'Bad edit result' });
+};
+
+function reelNative(method) {
+  return hasNative && Native && typeof Native[method] === 'function';
+}
+
+function reelNativeCall(method) {
+  const args = Array.prototype.slice.call(arguments, 1);
+  try { return Native[method].apply(Native, args); }
+  catch (e) { return JSON.stringify({ ok: false, message: 'Native ' + method + ' failed: ' + e }); }
+}
+
+function reelParse(value) {
+  try {
+    const result = typeof value === 'string' ? JSON.parse(value) : value;
+    return result && typeof result === 'object' ? result : { ok: false, message: 'Bad media result' };
+  } catch (e) { return { ok: false, message: 'Bad media result: ' + e }; }
+}
+
+function reelMediaPath(kind) {
+  return loadJSON('jv.reel.media', {})[kind] || '';
+}
+
+function reelRememberMedia(kind, path) {
+  if (!path) return;
+  const all = loadJSON('jv.reel.media', {});
+  all[kind] = path;
+  saveJSON('jv.reel.media', all);
+}
+
+function reelPickMedia(kind) {
+  return new Promise(resolve => {
+    if (!reelNative('pickMedia')) {
+      resolve({ ok: false, message: 'Is build mein media picker available nahi hai.' });
+      return;
+    }
+    const id = 'med' + (++mediaSeq);
+    const timer = setTimeout(() => {
+      if (pendingMediaPick[id]) {
+        delete pendingMediaPick[id];
+        resolve({ ok: false, message: 'Media select nahi hua.' });
+      }
+    }, 120000);
+    pendingMediaPick[id] = { resolve, timer };
+    try { Native.pickMedia(kind, id); }
+    catch (e) {
+      delete pendingMediaPick[id];
+      clearTimeout(timer);
+      resolve({ ok: false, message: 'Media picker start fail: ' + e });
+    }
+  });
+}
+
+async function reelEnsureMedia(kind, supplied) {
+  let path = String(supplied || '').trim();
+  if (!path) path = reelMediaPath(kind);
+  if (path) return { ok: true, path };
+  const picked = await reelPickMedia(kind);
+  if (!picked.ok) return picked;
+  reelRememberMedia(kind, picked.path || picked.uri || '');
+  return { ok: true, path: picked.path || picked.uri || '' };
+}
+
+function reelTrimVideo(path, startSec, endSec) {
+  return new Promise(resolve => {
+    if (!reelNative('trimVideo')) {
+      resolve({ ok: false, message: 'Is build mein video trim available nahi hai.' });
+      return;
+    }
+    const id = 'edit' + (++mediaSeq);
+    const timer = setTimeout(() => {
+      if (pendingMediaTrim[id]) {
+        delete pendingMediaTrim[id];
+        resolve({ ok: false, message: 'Video edit ka jawab nahi mila.' });
+      }
+    }, 180000);
+    pendingMediaTrim[id] = { resolve, timer };
+    try { Native.trimVideo(path, Number(startSec), Number(endSec), id); }
+    catch (e) {
+      delete pendingMediaTrim[id];
+      clearTimeout(timer);
+      resolve({ ok: false, message: 'Video trim fail: ' + e });
+    }
+  });
+}
+
+async function reelImageOperation(args) {
+  args = args || {};
+  const action = String(args.action || 'photo').toLowerCase();
+  if (!reelNative('editPhoto')) return { ok: false, message: 'Is build mein photo editor available nahi hai.' };
+  if (action === 'pick') {
+    const picked = await reelPickMedia('image');
+    if (picked.ok) reelRememberMedia('image', picked.path || picked.uri || '');
+    return picked;
+  }
+  const source = await reelEnsureMedia('image', args.path);
+  if (!source.ok) return source;
+  let op = action;
+  if (op === 'photo') op = 'info';
+  if (op === 'analyse') op = 'analyze';
+  if (op === 'open') {
+    return reelParse(reelNativeCall('openMedia', source.path, 'image'));
+  }
+  const options = args.options || {};
+  if (args.preset) options.preset = args.preset;
+  if (args.width !== undefined) options.width = args.width;
+  if (args.height !== undefined) options.height = args.height;
+  if (args.x !== undefined) options.x = args.x;
+  if (args.y !== undefined) options.y = args.y;
+  if (args.crop_width !== undefined) options.crop_width = args.crop_width;
+  if (args.crop_height !== undefined) options.crop_height = args.crop_height;
+  if (args.degrees !== undefined) options.degrees = args.degrees;
+  if (args.text) options.text = args.text;
+  const result = reelParse(reelNativeCall('editPhoto', source.path, op, JSON.stringify(options)));
+  if (result.ok && result.output && op !== 'info' && op !== 'analyze') reelRememberMedia('image', result.output);
+  if (op === 'analyze' && result.ok) {
+    return {
+      ok: true,
+      message: 'Photo milti hai: ' + (result.width || '?') + 'x' + (result.height || '?') +
+        ' pixels. Phone par main iski real edit kar sakta hoon; poora visual samajhne ke liye PC version use karein.',
+      data: result
+    };
+  }
+  return result;
+}
+
+async function reelVideoOperation(args) {
+  args = args || {};
+  const action = String(args.action || 'edit').toLowerCase();
+  if (!reelNative('editPhoto')) return { ok: false, message: 'Is build mein video tools available nahi hain.' };
+  if (action === 'pick') {
+    const picked = await reelPickMedia('video');
+    if (picked.ok) reelRememberMedia('video', picked.path || picked.uri || '');
+    return picked;
+  }
+  const source = await reelEnsureMedia('video', args.path);
+  if (!source.ok) return source;
+  if (action === 'open' || action === 'edit' || action === 'editor') {
+    return reelParse(reelNativeCall('openMedia', source.path, 'video'));
+  }
+  if (action === 'info' || action === 'analyze') {
+    return {
+      ok: true,
+      message: 'Video selected hai. Phone par main isko real trim kar ke naya MP4 bana sakta hoon; detailed visual/audio analysis PC version par hai.',
+      data: { path: source.path }
+    };
+  }
+  if (action === 'trim' || action === 'cut') {
+    const start = Number(args.start || args.start_sec || 0);
+    const end = Number(args.end || args.end_sec || 0);
+    if (!isFinite(start) || !isFinite(end) || end <= start) {
+      return { ok: false, message: 'Trim ke liye start aur end seconds batayein, jaise 5 se 20.' };
+    }
+    const result = await reelTrimVideo(source.path, start, end);
+    if (result.ok && result.output) reelRememberMedia('video', result.output);
+    return result;
+  }
+  return { ok: false, message: 'Video action: pick, info, analyze, trim, cut ya open.' };
+}
+
+async function reelIssOperation(args) {
+  args = args || {};
+  const action = String(args.action || 'status').toLowerCase();
+  // Same public provider as Jarvis PC, with Open Notify as a fallback.
+  const endpoints = [
+    'https://api.wheretheiss.at/v1/satellites/25544',
+    'https://api.open-notify.org/iss-now.json'
+  ];
+  let lat = NaN;
+  let lon = NaN;
+  let altitude = null;
+  let lastError = '';
+  for (const url of endpoints) {
+    const response = await nativeHttpRequest('GET', url, {}, '', 8000);
+    if (!response.ok) { lastError = 'HTTP ' + response.status; continue; }
+    let data;
+    try { data = JSON.parse(response.body); } catch (e) { lastError = 'jawab samajh nahi aaya'; continue; }
+    const pos = data && (data.iss_position || data);
+    if (!pos || pos.latitude == null || pos.longitude == null) { lastError = 'position response mein nahi mila'; continue; }
+    lat = Number(pos.latitude);
+    lon = Number(pos.longitude);
+    if (data.altitude != null) altitude = Number(data.altitude);
+    if (Number.isFinite(lat) && Number.isFinite(lon)) break;
+    lat = NaN; lon = NaN;
+  }
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    return { ok: false, message: 'ISS data abhi nahi mila (' + (lastError || 'network') + ').' };
+  }
+  let message = 'ISS abhi latitude ' + lat.toFixed(2) + ', longitude ' + lon.toFixed(2) + ' par hai.';
+  if (altitude != null && Number.isFinite(altitude)) message += ' Unchai ' + altitude.toFixed(0) + ' km.';
+  if (action === 'map' || action === 'track' || action === 'open') {
+    const url = 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(lat + ',' + lon);
+    if (hasNative && Native.openUrl) Native.openUrl(url);
+    return { ok: true, message: message + ' Map khol diya.', data: { latitude: lat, longitude: lon, altitude, url } };
+  }
+  return { ok: true, message, data: { latitude: lat, longitude: lon, altitude } };
+}
+
+function reelCommerceOperation(args) {
+  args = args || {};
+  const action = String(args.action || 'list').toLowerCase();
+  const list = loadJSON('jv.reel.shopping', []);
+  if (action === 'add') {
+    const item = String(args.item || args.text || '').trim();
+    if (!item) return { ok: false, message: 'List mein kya daalna hai?' };
+    if (!list.some(x => String(x).toLowerCase() === item.toLowerCase())) {
+      list.push(item);
+      saveJSON('jv.reel.shopping', list);
+    }
+    return { ok: true, message: item + ' grocery list mein hai.' };
+  }
+  if (action === 'remove' || action === 'delete') {
+    const item = String(args.item || args.text || '').trim().toLowerCase();
+    const before = list.length;
+    const next = list.filter(x => String(x).toLowerCase() !== item);
+    saveJSON('jv.reel.shopping', next);
+    return { ok: true, message: next.length < before ? item + ' hata diya.' : 'Yeh item list mein nahi tha.' };
+  }
+  if (action === 'clear') {
+    saveJSON('jv.reel.shopping', []);
+    return { ok: true, message: 'Grocery list clear kar diya.' };
+  }
+  if (action === 'order' || action === 'open') {
+    const service = String(args.service || 'food').toLowerCase();
+    const query = String(args.query || args.item || list.join(' ')).trim();
+    const urls = {
+      food: 'https://www.google.com/search?q=' + encodeURIComponent((query || 'food delivery near me') + ' food delivery'),
+      groceries: 'https://www.google.com/search?q=' + encodeURIComponent((query || 'grocery delivery near me') + ' grocery delivery'),
+      instamart: 'https://www.google.com/search?q=' + encodeURIComponent((query || 'instamart') + ' instamart'),
+      blinkit: 'https://www.google.com/search?q=' + encodeURIComponent((query || 'blinkit') + ' blinkit')
+    };
+    const url = urls[service] || urls.food;
+    if (hasNative && Native.openUrl) Native.openUrl(url);
+    return {
+      ok: true,
+      needs_user_action: true,
+      message: 'Maine ' + (service === 'groceries' ? 'grocery' : 'food') + ' options khol diye hain. Order aur payment aapko khud confirm karna hoga.'
+    };
+  }
+  return { ok: true, message: list.length ? 'Aapki list: ' + list.join(', ') + '.' : 'Grocery list khaali hai.' };
+}
+
+async function reelAnalyticsOperation(args) {
+  args = args || {};
+  const action = String(args.action || 'status').toLowerCase();
+  if (action === 'status' || action === 'config') {
+    const cfg = loadJSON('jv.reel.analytics', {});
+    return { ok: true, message: cfg.url ? 'Analytics target saved hai: ' + cfg.url : 'Koi analytics target save nahi hua.' };
+  }
+  if (action === 'configure' || action === 'set') {
+    const url = String(args.url || '').trim();
+    if (!/^https:\/\//i.test(url)) return { ok: false, message: 'Analytics ke liye https URL do.' };
+    saveJSON('jv.reel.analytics', { url });
+    return { ok: true, message: 'Analytics target save ho gaya.' };
+  }
+  const url = String(args.url || loadJSON('jv.reel.analytics', {}).url || '').trim();
+  if (!/^https:\/\//i.test(url)) return { ok: false, message: 'Pehle public profile ya post ka https URL do.' };
+  if (/instagram\.com/i.test(url)) {
+    if (hasNative && Native.openUrl) Native.openUrl(url);
+    return { ok: true, needs_user_action: true, message: 'Instagram insights login ke baad hi dikhte hain; maine profile khol diya hai.' };
+  }
+  const response = await nativeHttpRequest('GET', url, { 'User-Agent': 'Mozilla/5.0' }, '', 10000);
+  if (!response.ok) return { ok: false, message: 'Public page nahi mila: HTTP ' + response.status };
+  const body = response.body || '';
+  const metrics = {};
+  const patterns = { views: /"viewCount":"?(\d+)/i, subscribers: /"subscriberCount":"?(\d+)/i, likes: /"likeCount":"?(\d+)/i };
+  Object.keys(patterns).forEach(k => { const m = body.match(patterns[k]); if (m) metrics[k] = Number(m[1]); });
+  const found = Object.keys(metrics);
+  return found.length
+    ? { ok: true, message: 'Public metrics: ' + found.map(k => k + ' ' + metrics[k]).join(', ') + '.', data: metrics }
+    : { ok: false, message: 'Is public page par views/comments expose nahi ho rahe. Login ya official API chahiye.' };
+}
+
+async function reelNotificationOperation(args) {
+  args = args || {};
+  const action = String(args.action || 'status').toLowerCase();
+  const cfg = loadJSON('jv.reel.ntfy', {});
+  if (action === 'configure' || action === 'config') {
+    const topic = String(args.topic || '').trim().replace(/^https?:\/\/[^\/]+\//i, '').replace(/^\/+/, '');
+    if (!/^[A-Za-z0-9_-]{3,100}$/.test(topic)) return { ok: false, message: 'Valid ntfy topic do (letters, numbers, dash, underscore).' };
+    saveJSON('jv.reel.ntfy', { topic });
+    return { ok: true, message: 'ntfy topic save ho gaya: ' + topic };
+  }
+  if (action === 'status') return { ok: true, message: cfg.topic ? 'ntfy topic configured hai: ' + cfg.topic : 'Koi ntfy topic configured nahi hai.' };
+  if (action === 'send' || action === 'alert') {
+    if (!cfg.topic) return { ok: false, message: 'Pehle ntfy topic configure karein.' };
+    if (!args.confirmed) {
+      return { ok: false, needs_user_action: true, message: cfg.topic + ' par alert bhejna hai? Confirm karein.' };
+    }
+    const text = String(args.message || args.text || '').trim();
+    if (!text) return { ok: false, message: 'Alert ka message kya hai?' };
+    const response = await nativeHttpRequest('POST', 'https://ntfy.sh/' + encodeURIComponent(cfg.topic),
+      { 'Content-Type': 'text/plain; charset=utf-8', 'Title': 'Jarvis Mobile' }, text, 8000);
+    return response.ok
+      ? { ok: true, message: 'Alert bhej diya.' }
+      : { ok: false, message: 'Alert nahi bheja gaya: HTTP ' + response.status };
+  }
+  return { ok: false, message: 'Notification action: configure, status ya send.' };
+}
+
+async function reelPhoneAgentOperation(args) {
+  args = args || {};
+  const action = String(args.action || 'status').toLowerCase();
+  if (action === 'status') {
+    return { ok: true, message: 'Phone agent available hai: call hand-off kaam karta hai. Automatic call recording/transcript Android par allowed nahi hai.' };
+  }
+  if (action === 'call' || action === 'dial') {
+    const phone = String(args.phone || '').trim();
+    if (!phone) return { ok: false, message: 'Call ke liye number do.' };
+    if (!args.confirmed) return { ok: false, needs_user_action: true, message: phone + ' par call karna hai? Confirm karein.' };
+    const result = await callTool('call_number', { phone });
+    return {
+      ok: !!result.ok,
+      needs_user_action: true,
+      message: result.ok ? 'Dialer ready hai; call aapko dabani hogi.' : (result.message || 'Dialer nahi khul paaya.')
+    };
+  }
+  if (action === 'transcript') {
+    return { ok: false, message: 'Main call recording/transcript nahi kar sakta. Android yeh izazat nahi deta aur main jhoot nahi bolunga.' };
+  }
+  return { ok: false, message: 'Phone action: status, call ya transcript.' };
+}
+
+function reelGameOperation(args) {
+  args = args || {};
+  const action = String(args.action || 'status').toLowerCase();
+  if (action === 'status' || action === 'library') {
+    return { ok: true, message: 'Steam/Epic library scan PC-only hai. Phone par main Play Store aur cloud gaming apps khol sakta hoon.' };
+  }
+  const query = String(args.query || args.game || '').trim();
+  if (action === 'open' || action === 'install' || action === 'search') {
+    const url = 'https://play.google.com/store/search?q=' + encodeURIComponent(query || 'games') + '&c=apps';
+    if (hasNative && Native.openUrl) Native.openUrl(url);
+    return { ok: true, needs_user_action: true, message: 'Play Store search khol diya. Install aapko confirm karna hoga.' };
+  }
+  return { ok: false, message: 'Game action: status ya open.' };
 }
 
 /* ============================================================== GEMINI BRAIN */
@@ -3944,6 +4335,115 @@ function toolDeclarations() {
       }
     },
     {
+      name: 'iss_operation',
+      description: 'Get the real current International Space Station position from a public endpoint, and optionally open a phone map.',
+      parameters: {
+        type: 'OBJECT',
+        properties: { action: { type: 'STRING', description: 'status or map/track' } }
+      }
+    },
+    {
+      name: 'image_operation',
+      description: 'Pick and edit a real local photo: info, crop, resize, rotate, flip, grayscale, sepia, blur, text or open in an editor. Never overwrites the original.',
+      parameters: {
+        type: 'OBJECT',
+        properties: {
+          action: { type: 'STRING', description: 'pick, info, analyze, resize, crop, rotate, flip, grayscale, sepia, blur, text or open' },
+          path: { type: 'STRING' },
+          preset: { type: 'STRING', description: '9:16, 1:1 or 16:9 when supported' },
+          width: { type: 'INTEGER' },
+          height: { type: 'INTEGER' },
+          x: { type: 'INTEGER' },
+          y: { type: 'INTEGER' },
+          crop_width: { type: 'INTEGER' },
+          crop_height: { type: 'INTEGER' },
+          degrees: { type: 'NUMBER' },
+          text: { type: 'STRING' }
+        },
+        required: ['action']
+      }
+    },
+    {
+      name: 'video_operation',
+      description: 'Pick a local video, open it in the phone editor, or create a real trimmed MP4 stream-copy output with start and end seconds.',
+      parameters: {
+        type: 'OBJECT',
+        properties: {
+          action: { type: 'STRING', description: 'pick, info, analyze, trim, cut, edit or open' },
+          path: { type: 'STRING' },
+          start: { type: 'NUMBER', description: 'Start seconds for trim/cut' },
+          end: { type: 'NUMBER', description: 'End seconds for trim/cut' }
+        },
+        required: ['action']
+      }
+    },
+    {
+      name: 'commerce_operation',
+      description: 'Manage a local grocery list and open real food/grocery options. It cannot place an order or take payment.',
+      parameters: {
+        type: 'OBJECT',
+        properties: {
+          action: { type: 'STRING', description: 'list, add, remove, clear, order or open' },
+          item: { type: 'STRING' },
+          service: { type: 'STRING', description: 'food, groceries, instamart or blinkit' },
+          query: { type: 'STRING' }
+        },
+        required: ['action']
+      }
+    },
+    {
+      name: 'analytics_operation',
+      description: 'Check public views/subscribers/likes on a supplied https page, or open Instagram where insights require the user login.',
+      parameters: {
+        type: 'OBJECT',
+        properties: {
+          action: { type: 'STRING', description: 'status, configure, public or open' },
+          url: { type: 'STRING' }
+        },
+        required: ['action']
+      }
+    },
+    {
+      name: 'notification_operation',
+      description: 'Configure an ntfy topic and send a real remote alert after user confirmation.',
+      parameters: {
+        type: 'OBJECT',
+        properties: {
+          action: { type: 'STRING', description: 'configure, status or send' },
+          topic: { type: 'STRING' },
+          message: { type: 'STRING' },
+          confirmed: { type: 'BOOLEAN' }
+        },
+        required: ['action']
+      }
+    },
+    {
+      name: 'phone_agent_operation',
+      description: 'Prepare a phone call hand-off or explain honest transcript limits. Never places a call without confirmation.',
+      parameters: {
+        type: 'OBJECT',
+        properties: {
+          action: { type: 'STRING', description: 'status, call or transcript' },
+          phone: { type: 'STRING' },
+          confirmed: { type: 'BOOLEAN' }
+        },
+        required: ['action']
+      }
+    },
+    {
+      name: 'game_operation',
+      description: 'Honest mobile equivalent of the PC Steam/Epic reel: report desktop-only limits or open a real Play Store game search.',
+      parameters: {
+        type: 'OBJECT',
+        properties: {
+          action: { type: 'STRING', description: 'status, library, open or install' },
+          game: { type: 'STRING' },
+          query: { type: 'STRING' }
+        },
+        required: ['action']
+      }
+    },
+    {
       name: 'read_page',
       description: 'Read the visible text of the CURRENT screen/app (needs Phone automation). Use before answering questions about what is on screen.',
       parameters: { type: 'OBJECT', properties: {} }
@@ -4012,6 +4512,7 @@ function buildSystemPrompt(userText) {
     'MEMORY: you have real long-term memory on this phone. When the user shares something lasting, or says "yaad rakho" / "never forget", call remember with a short English fact, a category and importance (pin:true for a permanent detail). When asked what you remember about a topic, call recall_memory FIRST; never say you forgot before checking. Use forget_memory when the user asks you to forget something. Answer naturally and never read the whole list out.',
     'PERSONALITY PROFILE:\n' + personaPromptBlock(),
     'ASSISTANT 2.2: persona, calendar (local + phone), routine, workspace (GitHub/Slack/Notion/Linear/Jira with local tokens), mcp (remote streamable HTTP), read_page, summarize_text and dictation are available. Use workspace list/summarize before writing; writes need the user to confirm.',
+    'REEL FEATURES: iss_operation gives real ISS position and a phone map; video_operation and image_operation pick/edit local media and produce real saved outputs; commerce_operation manages food/grocery lists and opens services; analytics_operation checks public views/comments; notification_operation sends ntfy alerts when the user has configured a topic; phone_agent_operation prepares a call hand-off. Never claim an order, purchase, call, post, or remote alert happened unless the tool confirms it.',
     'DICTATION: dictation action=start types speech into other apps; "scratch that", "capitalize that", "new paragraph", "comma" edit the dictation buffer. It needs Phone automation for direct typing, otherwise text goes to the clipboard.',
     'ROUTINES: routines run only while Jarvis is open or its background service is alive; never promise they run after the app is killed.',
     'CALENDAR: action=add stores locally; pass insert_phone:true when the user wants it in the real phone calendar. Always use the real date/time returned by the tool, never invent it.',
@@ -4136,6 +4637,30 @@ async function runTool(name, args) {
   }
   if (name === 'mcp') {
     return mcpOperation(args && args.action, args || {});
+  }
+  if (name === 'iss_operation') {
+    return reelIssOperation(args);
+  }
+  if (name === 'image_operation') {
+    return reelImageOperation(args);
+  }
+  if (name === 'video_operation') {
+    return reelVideoOperation(args);
+  }
+  if (name === 'commerce_operation') {
+    return reelCommerceOperation(args);
+  }
+  if (name === 'analytics_operation') {
+    return reelAnalyticsOperation(args);
+  }
+  if (name === 'notification_operation') {
+    return reelNotificationOperation(args);
+  }
+  if (name === 'phone_agent_operation') {
+    return reelPhoneAgentOperation(args);
+  }
+  if (name === 'game_operation') {
+    return reelGameOperation(args);
   }
   if (name === 'read_page') {
     return pageRead();
@@ -4536,7 +5061,7 @@ function renderSettings() {
 
   const about = $('#aboutText');
   if (about) {
-    let v = '2.2.1';
+    let v = '2.3.0';
     let d = 'Android';
     try { v = Native.version(); d = Native.deviceSummary(); } catch (e) { }
     about.textContent = 'Jarvis Mobile ' + v + ' · ' + d;
@@ -5610,6 +6135,8 @@ function init() {
   // Expose a tiny self-test for adb debugging.
   window.__jarvisSelfTest = () => {
     const status = (() => { try { return JSON.parse(Native.getStatus()); } catch (e) { return null; } })();
+    // Enumerating TTS voices is expensive on some devices; do it once.
+    const voiceList = (() => { try { return JSON.parse(Native.getVoices()); } catch (e) { return []; } })();
     return JSON.stringify({
       native: hasNative,
       key: !!Native.hasApiKey(),
@@ -5621,23 +6148,20 @@ function init() {
       voice: settings.voiceGender,
       lang: settings.langMode,
       stt: (() => { try { return Native.canListen(); } catch (e) { return false; } })(),
-      voices: (() => { try { return JSON.parse(Native.getVoices()).length; } catch (e) { return -1; } })(),
-      maleVoices: (() => {
-        try {
-          return JSON.parse(Native.getVoices())
-            .filter(v => v && v.gender === 'male')
-            .slice(0, 8)
-            .map(v => v.locale + ' | ' + v.name);
-        } catch (e) { return []; }
+      reelMedia: (() => { try { return reelNative('pickMedia') && reelNative('editPhoto') && reelNative('trimVideo'); } catch (e) { return false; } })(),
+      reelMediaSelfTest: (() => {
+        try { return reelNative('mediaSelfTest') ? JSON.parse(Native.mediaSelfTest()) : null; }
+        catch (e) { return { ok: false, message: String(e) }; }
       })(),
-      enVoices: (() => {
-        try {
-          return JSON.parse(Native.getVoices())
-            .filter(v => v && /^(en-IN|en-GB|ur)/i.test(v.locale || ''))
-            .slice(0, 40)
-            .map(v => (v.locale || '') + '|' + v.name + '|q' + (v.quality || 0));
-        } catch (e) { return []; }
-      })()
+      voices: voiceList.length,
+      maleVoices: voiceList
+        .filter(v => v && v.gender === 'male')
+        .slice(0, 8)
+        .map(v => v.locale + ' | ' + v.name),
+      enVoices: voiceList
+        .filter(v => v && /^(en-IN|en-GB|ur)/i.test(v.locale || ''))
+        .slice(0, 40)
+        .map(v => (v.locale || '') + '|' + v.name + '|q' + (v.quality || 0))
     });
   };
 

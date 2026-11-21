@@ -1,8 +1,8 @@
-# Jarvis Mobile 2.2 — Assistant guide
+# Jarvis Mobile 2.3 — Assistant guide
 
 Everything on this page is optional. Data stays in this app's local storage on
 the phone; tokens are sent only to the service you configure. Open
-**Settings > ASSISTANT 2.2** for the panels.
+**Settings > ASSISTANT 2.2** for the existing panels.
 
 ## Personality and writing voice
 
@@ -100,10 +100,43 @@ Global dictation turns speech into text for the focused field.
 - Dictation is foreground: it uses the microphone while Jarvis is running. It is
   not a system keyboard replacement.
 
+## Reel features (v2.3)
+
+These are the phone-compatible versions of the abilities shown in the Jarvis
+reels. Commands are available through natural language and Gemini function calls.
+
+| Say | What really happens |
+|-----|---------------------|
+| `where is the ISS?` / `ISS track karo` | Reads the public ISS endpoint and opens a map when asked. |
+| `photo pick karo` | Opens the Android file picker and keeps the chosen image for later edits. |
+| `is photo ko crop karo` / `black and white karo` | Applies a real local edit and saves a separate file. The original is never overwritten. |
+| `video pick karo` | Opens the Android video picker. |
+| `video ko 5 se 20 second tak cut karo` | Creates a new MP4 with Android `MediaExtractor`/`MediaMuxer`. |
+| `grocery list mein eggs daalo` / `grocery list dikhao` | Updates a local list on the phone. |
+| `food order karo` | Opens real food/grocery options. You must place and pay for the order. |
+| `ntfy topic setup karo` / `alert bhejo` | Configures a topic and sends a real ntfy POST after confirmation. |
+| `number par call karo` | Opens the dialer after confirmation. Android does not allow silent calling. |
+
+Honest limits:
+
+- Detailed visual/audio video understanding, call transcription, background
+  removal, layers and desktop overlays are PC/desktop-level features. Mobile
+  reports the limit instead of pretending it completed the task.
+- Steam/Epic library internals are desktop-only. On a phone, `game_operation`
+  can only report that limit or open a real Play Store game search.
+- Instagram insights require the account login in Instagram; Jarvis opens the
+  profile and does not scrape private data.
+- Media files are copied into the app's own cache/external-files folders and are
+  not uploaded anywhere.
+
+QA can run `window.__jarvisSelfTest()` through the debug WebView hook. It now
+reports `reelMedia` and `reelMediaSelfTest`, which creates and edits a synthetic
+bitmap in the app cache only.
+
 ## Privacy
 
-- Personality samples, calendar events, routines, work tokens and MCP settings
-  live in this app's local storage.
+- Personality samples, calendar events, routines, work tokens, ntfy settings,
+  analytics targets and MCP settings live in this app's local storage.
 - Tokens are sent only to the service you configured; page text is sent only to
   Gemini for the summary you requested.
 - No analytics server, no keystore or token is committed to this repository.

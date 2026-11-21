@@ -210,7 +210,38 @@ public class TtsEngine implements TextToSpeech.OnInitListener {
         });
     }
 
+    private volatile String cachedVoicesJson = "[]";
+    private volatile long cachedVoicesAt = 0L;
+    private static final long VOICE_CACHE_MS = 60000L;
+    private static final long VOICE_QUERY_TIMEOUT_MS = 2500L;
+
+    /**
+     * Voice enumeration is a synchronous binder call and can stall when a TTS
+     * engine is busy. Keep the WebView responsive: query on a short-lived daemon
+     * thread and fall back to the last successful result.
+     */
     public String getVoicesJson() {
+        String cached = cachedVoicesJson;
+        long now = System.currentTimeMillis();
+        if (cached != null && now - cachedVoicesAt < VOICE_CACHE_MS) return cached;
+        final String[] result = new String[1];
+        Thread query = new Thread(() -> result[0] = queryVoicesJson(), "jarvis-voice-query");
+        query.setDaemon(true);
+        try {
+            query.start();
+            query.join(VOICE_QUERY_TIMEOUT_MS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        if (result[0] != null) {
+            cachedVoicesJson = result[0];
+            cachedVoicesAt = System.currentTimeMillis();
+            return result[0];
+        }
+        return cached == null ? "[]" : cached;
+    }
+
+    private String queryVoicesJson() {
         JSONArray arr = new JSONArray();
         try {
             if (tts == null) initEngine();
