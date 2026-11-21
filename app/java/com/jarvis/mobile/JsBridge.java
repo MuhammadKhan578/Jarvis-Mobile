@@ -46,6 +46,9 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
     private static final String KEY_SEEDED = "key_seeded";
     private static final String KEY_NEURAL = "neural_voice";
     private static final String KEY_NEURAL_VOICE = "neural_voice_name";
+    /** Own request code; MainActivity only forwards mic/camera results, so the
+     *  call permission result is verified by re-checking the OS state below. */
+    private static final int REQ_CALL_PHONE = 1004;
 
     private final Activity activity;
     private final WebView web;
@@ -54,6 +57,7 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
     private final SpeechEngine speech;
     private final SharedPreferences prefs;
     private final MediaTools media;
+    private OverlayGuide overlay;
     /** Maps picker request codes (>= 2000) to the JS request id. */
     private final java.util.Map<Integer, String> mediaPickRequests = new java.util.HashMap<>();
     private int nextMediaPickCode = 2000;
@@ -511,6 +515,96 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
         return JarvisAccessibilityService.performAction(action);
     }
 
+    // ------------------------------------------- real overlay + auto-call API
+
+    private OverlayGuide overlay() {
+        if (overlay == null) overlay = OverlayGuide.get(activity);
+        return overlay;
+    }
+
+    /** True only when Android granted "Display over other apps". */
+    @JavascriptInterface
+    public boolean canDrawOverlay() {
+        return overlay().canDraw();
+    }
+
+    @JavascriptInterface
+    public String openOverlaySettings() {
+        return overlay().openSettings();
+    }
+
+    /** Draws a real highlight at absolute screen bounds. */
+    @JavascriptInterface
+    public String overlayShow(int x, int y, int w, int h, String label) {
+        return overlay().show(x, y, w, h, label);
+    }
+
+    @JavascriptInterface
+    public String overlayHide() {
+        return overlay().hide();
+    }
+
+    @JavascriptInterface
+    public String overlayStatus() {
+        return overlay().status();
+    }
+
+    @JavascriptInterface
+    public boolean canCallPhone() {
+        return AppIntents.hasCallPermission(activity);
+    }
+
+    /**
+     * Opens the real runtime permission dialog. The result is verified by
+     * re-checking the OS state and reported via jarvisNative.onPermission('call', ...).
+     */
+    @JavascriptInterface
+    public String requestCallPermission() {
+        if (canCallPhone()) {
+            return "{\"ok\":true,\"requested\":false,\"granted\":true,"
+                    + "\"message\":\"Phone calls permission already granted.\"}";
+        }
+        main.post(() -> {
+            try {
+                activity.requestPermissions(new String[]{Manifest.permission.CALL_PHONE}, REQ_CALL_PHONE);
+                for (int delay : new int[]{1500, 4000, 10000}) {
+                    main.postDelayed(() -> callJs("window.jarvisNative&&jarvisNative.onPermission("
+                            + q("call") + "," + canCallPhone() + ")"), delay);
+                }
+            } catch (Exception e) {
+                callJs("window.jarvisNative&&jarvisNative.onPermission(" + q("call") + ",false)");
+            }
+        });
+        return "{\"ok\":true,\"requested\":true,\"granted\":false,"
+                + "\"message\":\"Phone calls permission prompt opened. Grant karein, phir dobara try karein.\"}";
+    }
+
+    @JavascriptInterface
+    public void setAutoCallNumber(String number) {
+        AppIntents.setAutoCallNumber(activity, number);
+    }
+
+    @JavascriptInterface
+    public String getAutoCallNumber() {
+        return AppIntents.getAutoCallNumber(activity);
+    }
+
+    @JavascriptInterface
+    public void setAutoCallEnabled(boolean on) {
+        AppIntents.setAutoCallEnabled(activity, on);
+    }
+
+    @JavascriptInterface
+    public boolean getAutoCallEnabled() {
+        return AppIntents.getAutoCallEnabled(activity);
+    }
+
+    /** Real ACTION_CALL; see AppIntents.autoCall for the fail-closed checks. */
+    @JavascriptInterface
+    public String autoCall(String number, String reason) {
+        return AppIntents.autoCall(activity, number, reason);
+    }
+
     // ------------------------------------------------------- STT callbacks
 
     @Override
@@ -933,7 +1027,7 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
 
     @JavascriptInterface
     public String version() {
-        return "2.3.0";
+        return "2.3.1";
     }
 
     @JavascriptInterface

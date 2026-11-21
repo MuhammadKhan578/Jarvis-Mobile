@@ -126,7 +126,7 @@ const Native = window.Android || {
   },
   executeTool: () => JSON.stringify({ ok: false, message: 'Native tools available nahi hain.' }),
   getStatus: () => JSON.stringify({ ok: true, data: { online: navigator.onLine, battery: -1, network: 'unknown' } }),
-  version: () => '2.3.0-web',
+  version: () => '2.3.1-web',
   deviceSummary: () => 'Browser',
   toast: (m) => window.jarvisToast && window.jarvisToast(m),
   vibrate: () => { },
@@ -158,6 +158,19 @@ const Native = window.Android || {
   uiDump: () => '',
   uiType: () => false,
   systemAction: () => false,
+  // No fake success in the browser fallback: these tools are Android-only.
+  canDrawOverlay: () => false,
+  openOverlaySettings: () => JSON.stringify({ ok: false, message: 'Overlay Android par hi available hai.' }),
+  overlayShow: () => JSON.stringify({ ok: false, canDraw: false, permission: 'needed', message: 'Overlay Android par hi available hai.' }),
+  overlayHide: () => JSON.stringify({ ok: false, message: 'Overlay Android par hi available hai.' }),
+  overlayStatus: () => JSON.stringify({ ok: true, canDraw: false, shown: false, permission: 'needed' }),
+  canCallPhone: () => false,
+  requestCallPermission: () => JSON.stringify({ ok: false, message: 'Call permission Android par hi available hai.' }),
+  setAutoCallNumber: () => { },
+  getAutoCallNumber: () => '',
+  setAutoCallEnabled: () => { },
+  getAutoCallEnabled: () => false,
+  autoCall: () => JSON.stringify({ ok: false, needs_user_action: true, message: 'Auto-call Android par hi available hai.' }),
   openUrl: (u) => { try { window.open(u, '_blank'); } catch (e) { } }
 };
 
@@ -176,6 +189,9 @@ const DEFAULTS = {
   // flashing and device-specific start/end chimes). Hands-free remains opt-in.
   handsFree: false,
   alwaysOn: false,
+  // Auto-call is never on by default: the user must opt in explicitly.
+  autoCallEnabled: false,
+  autoCallNumber: '',
   wakeRequired: true,
   onboarded: false,
   micSafetyVersion: 1
@@ -193,7 +209,8 @@ const FAST_TERMINAL_TOOLS = new Set([
   'call_number', 'compose_email', 'set_alarm', 'set_timer', 'navigate',
   'set_volume', 'torch', 'share_text', 'open_play_store', 'install_app',
   'smart_home', 'smart_scene', 'smart_home_setup', 'smart_home_help',
-  'news_brief', 'remember', 'device_status'
+  'news_brief', 'remember', 'device_status',
+  'auto_call', 'overlay_highlight', 'overlay_hide', 'call_status'
 ]);
 // Opening an app can be the first step of a longer automation ("Instagram
 // kholo aur story post karo"), so these only get the shortcut for a short,
@@ -271,8 +288,8 @@ const LINES = {
   bothMode: { roman: 'Both languages mode on.', urdu: 'دونوں زبانوں کا موڈ آن۔' },
   memoryCleared: { roman: 'Memory saaf kar di, sir.', urdu: 'میموری صاف کر دی، سر۔' },
   help: {
-    roman: 'Aap bol sakte hain: app kholo, YouTube ya Gmail kholo, WhatsApp message, alarm, timer, flashlight, volume, ghar ki light ya AC, movie mode, news sunao, ya koi bhi sawal. Settings mein voice, inbox aur smart home control hai.',
-    urdu: 'آپ بول سکتے ہیں: ایپ کھولو، یوٹیوب یا جیمیل کھولو، واٹس ایپ میسج، الارم، ٹائمر، فلیش لائٹ، والیوم، گھر کی لائٹ یا اے سی، مووی موڈ، نیوز سناؤ، یا کوئی بھی سوال۔ سیٹنگز میں وائس، ان باکس اور سمارٹ ہوم کنٹرول ہے۔'
+    roman: 'Aap bol sakte hain: app kholo, YouTube ya Gmail kholo, WhatsApp message, alarm, timer, flashlight, volume, ghar ki light ya AC, movie mode, news sunao, ya koi bhi sawal. Screen highlight ke liye "Display over other apps" izazat chahiye; auto-call ke liye number setup aur explicit opt-in chahiye.',
+    urdu: 'آپ بول سکتے ہیں: ایپ کھولو، یوٹیوب یا جیمیل کھولو، واٹس ایپ میسج، الارم، ٹائمر، فلیش لائٹ، والیوم، گھر کی لائٹ یا اے سی، مووی موڈ، نیوز سناؤ، یا کوئی بھی سوال۔ اسکرین ہائی لائٹ کے لیے "Display over other apps" اجازت چاہیے؛ آٹو کال کے لیے نمبر اور واضح اجازت چاہیے۔'
   },
   bye: { roman: 'Theek hai sir, app band kar raha hoon.', urdu: 'ٹھیک ہے سر، ایپ بند کر رہا ہوں۔' },
   keyMissing: {
@@ -1845,6 +1862,8 @@ function updateConnState() {
 /* ============================================================== TOOL CALLS */
 const pendingAutomation = {};
 let automationSeq = 0;
+/** "call setup <number>" is only committed after the user says yes. */
+let callSetupPending = '';
 
 /* Native posts the real install result here (Play Store install takes time). */
 window.jarvisAutomationDone = function (id, json) {
@@ -1864,7 +1883,54 @@ window.jarvisAutomationDone = function (id, json) {
  * real Play Store result (search -> Install -> wait -> Open) and can take a
  * couple of minutes for a big app.
  */
+function parseNativeResult(raw) {
+  let result;
+  try { result = JSON.parse(raw); } catch (e) { result = { ok: false, message: String(raw) }; }
+  if (!result || typeof result !== 'object') result = { ok: false, message: 'Bad tool result' };
+  if (typeof result.ok !== 'boolean') result.ok = false;
+  return result;
+}
+
 function callTool(name, args) {
+  // Real auto-call: never enabled by default; the native side checks number,
+  // CALL_PHONE permission and the explicit opt-in before ACTION_CALL.
+  if (name === 'auto_call') {
+    const number = String((args && (args.number || args.phone)) || '').trim();
+    const reason = String((args && args.reason) || '').trim();
+    try { return parseNativeResult(Native.autoCall(number, reason)); }
+    catch (e) { return { ok: false, message: 'Auto-call fail: ' + e, needs_user_action: true }; }
+  }
+  // Screen highlight: explicit accessibility bounds, or a UI label whose real
+  // bounds are found through the accessibility service on the native side.
+  if (name === 'overlay_highlight') {
+    const label = String((args && args.label) || '').trim();
+    const x = Number(args && args.x);
+    const y = Number(args && args.y);
+    const w = Number(args && args.w !== undefined ? args.w : args.width);
+    const h = Number(args && args.h !== undefined ? args.h : args.height);
+    const hasBounds = Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(w) &&
+      Number.isFinite(h) && x >= 0 && y >= 0 && w > 0 && h > 0;
+    try {
+      if (hasBounds) return parseNativeResult(Native.overlayShow(x, y, w, h, label));
+      if (label) return parseNativeResult(Native.executeTool('overlay_highlight', { label }));
+      return { ok: false, message: 'Highlight ke liye label ya screen bounds (x, y, w, h) do.' };
+    } catch (e) { return { ok: false, message: 'Overlay fail: ' + e }; }
+  }
+  if (name === 'overlay_hide') {
+    try { return parseNativeResult(Native.overlayHide()); }
+    catch (e) { return { ok: false, message: 'Overlay hide fail: ' + e }; }
+  }
+  if (name === 'call_status') {
+    let status;
+    try { status = parseNativeResult(Native.executeTool('call_status', {})); }
+    catch (e) { status = { ok: false, message: 'Call status fail: ' + e }; }
+    try {
+      status.number = Native.getAutoCallNumber();
+      status.autoCallEnabled = !!Native.getAutoCallEnabled();
+      status.callPhoneGranted = !!Native.canCallPhone();
+    } catch (e) { }
+    return status;
+  }
   if (name === 'install_app') {
     return new Promise((resolve) => {
       const id = 'auto' + (++automationSeq);
@@ -2174,6 +2240,62 @@ async function localCommand(text) {
     }
     return true;
   }
+  // Auto-call setup: confirmation is explicit, never implied by the setup command.
+  if (callSetupPending && /^(?:confirm|confirmed|haan|han|yes|kar do|theek hai|ok)$/.test(low)) {
+    const num = callSetupPending;
+    callSetupPending = '';
+    try {
+      Native.setAutoCallNumber(num);
+      Native.setAutoCallEnabled(true);
+    } catch (e) {
+      respond('Auto-call setup nahi hua: ' + e, LINES.generic.urdu);
+      return true;
+    }
+    const saved = String(Native.getAutoCallNumber() || '');
+    const enabled = !!Native.getAutoCallEnabled();
+    const msg = (saved && enabled)
+      ? 'Auto-call setup ho gaya. Call se pehle Phone calls permission bhi chahiye; call tabhi start hoga jab main bola jayega.'
+      : 'Auto-call setup nahi hua. Number dobara check karein.';
+    respond(msg, msg);
+    return true;
+  }
+  if (callSetupPending && /^(?:cancel|nahi|no|rehne do)$/.test(low)) {
+    callSetupPending = '';
+    respond('Auto-call setup cancel kar diya, sir.', 'آٹو کال سیٹ اپ منسوخ کر دیا، سر۔');
+    return true;
+  }
+  if (/^call setup\s+([+0-9][0-9\s()-]{4,25})$/.test(low)) {
+    const num = String(low.match(/^call setup\s+([+0-9][0-9\s()-]{4,25})$/)[1]).trim();
+    callSetupPending = num;
+    const msg = 'Auto-call number ' + num + ' save karna hai? Reply "haan" se confirm karein. '
+      + 'Ye explicit opt-in hoga; Phone calls permission alag se chahiye.';
+    respond(msg, msg);
+    return true;
+  }
+  if (/^(?:auto call on|autocall on|auto-call on)$/.test(low)) {
+    try { Native.setAutoCallEnabled(true); } catch (e) { }
+    const msg = !!Native.getAutoCallEnabled()
+      ? 'Auto-call on hai (explicit opt-in saved). Number aur Phone calls permission bhi chahiye.'
+      : 'Auto-call on nahi ho saka.';
+    respond(msg, msg);
+    return true;
+  }
+  if (/^(?:auto call off|autocall off|auto-call off)$/.test(low)) {
+    try { Native.setAutoCallEnabled(false); } catch (e) { }
+    const msg = 'Auto-call off kar diya, sir.';
+    respond(msg, msg);
+    return true;
+  }
+  if (/^(?:call permission do|phone permission do|call permission de|phone calls permission do)$/.test(low)) {
+    let msg = 'Call permission Android par hi available hai.';
+    try {
+      const r = parseNativeResult(Native.requestCallPermission());
+      msg = String(r.message || msg);
+    } catch (e) { }
+    respond(msg, msg);
+    return true;
+  }
+
   if (/^(?:confirm|confirmed|haan|han|yes|kar do|theek hai|ok)$/.test(low) && wsPending) {
     const job = wsPending;
     wsPending = null;
@@ -2326,6 +2448,35 @@ async function localCommand(text) {
     respond(LINES.help.roman, LINES.help.urdu);
     return true;
   }
+
+  // Real auto-call and screen highlight (both fail closed with the exact
+  // missing step, so nothing is ever claimed as done without the native result).
+  if (/\b(mujhe call kar(?:na| do)?|jarvis call kare|jarvis call karo|call me when needed|call me if needed|call me when required)\b/.test(low)) {
+    const r = await callTool('auto_call', { reason: low });
+    toolLog('auto_call', r);
+    respond(String(r.message || 'Call nahi ho saka.'), String(r.message || LINES.generic.urdu));
+    return true;
+  }
+  if (/\b(screen par dikhao|highlight karo|ye button dikhao|button highlight karo|ye dikhao)\b/.test(low)) {
+    const label = low.replace(/^(?:screen par dikhao|highlight karo|ye button dikhao|button highlight karo|ye dikhao)\s*/i, '').trim();
+    const r = await callTool('overlay_highlight', label ? { label } : {});
+    toolLog('overlay_highlight', r);
+    respond(String(r.message || 'Highlight nahi dikha saka.'), String(r.message || LINES.generic.urdu));
+    return true;
+  }
+  if (/^(?:highlight hatao|overlay hatao|highlight band karo|hatao highlight)$/.test(low)) {
+    const r = await callTool('overlay_hide', {});
+    toolLog('overlay_hide', r);
+    respond(String(r.message || 'Highlight nahi hata paya.'), String(r.message || LINES.generic.urdu));
+    return true;
+  }
+  if (/^(?:call status|auto call status|call setup status)$/.test(low)) {
+    const r = await callTool('call_status', {});
+    toolLog('call_status', r);
+    respond(String(r.message || 'Call status nahi mila.'), String(r.message || LINES.generic.urdu));
+    return true;
+  }
+
   if (/^(shutdown|shut down|exit|quit|app band|jarvis band|close app|bye jarvis)/.test(low)) {
     respond(LINES.bye.roman, LINES.bye.urdu);
     setTimeout(() => { try { Native.finishApp(); } catch (e) { } }, 2100);
@@ -3276,7 +3427,7 @@ async function mcpInitialize(name) {
   return mcpRpc(name, 'initialize', {
     protocolVersion: '2024-11-05',
     capabilities: {},
-    clientInfo: { name: 'jarvis-mobile', version: '2.3.0' }
+    clientInfo: { name: 'jarvis-mobile', version: '2.3.1' }
   });
 }
 async function mcpListTools(name) {
@@ -4444,6 +4595,39 @@ function toolDeclarations() {
       }
     },
     {
+      name: 'auto_call',
+      description: 'Place a REAL phone call with ACTION_CALL. Fails unless a number is configured, the CALL_PHONE runtime permission is granted, and the user has explicitly opted in. Never use for a silent call; never claim recording or transcription.',
+      parameters: {
+        type: 'OBJECT',
+        properties: {
+          number: { type: 'STRING', description: 'Optional; empty uses the saved auto-call number' },
+          reason: { type: 'STRING', description: 'Why this call is being placed' }
+        }
+      }
+    },
+    {
+      name: 'overlay_highlight',
+      description: 'Draw a real visible colored highlight over a UI element. Requires Display over other apps permission; provide exact x/y/width/height from accessibility bounds, or a visible label to locate its real bounds.',
+      parameters: {
+        type: 'OBJECT',
+        properties: {
+          x: { type: 'INTEGER' }, y: { type: 'INTEGER' },
+          width: { type: 'INTEGER' }, height: { type: 'INTEGER' },
+          label: { type: 'STRING', description: 'Visible button/text label when bounds are not supplied' }
+        }
+      }
+    },
+    {
+      name: 'overlay_hide',
+      description: 'Remove the current real screen highlight overlay.',
+      parameters: { type: 'OBJECT', properties: {} }
+    },
+    {
+      name: 'call_status',
+      description: 'Report real auto-call readiness: saved number, explicit opt-in, CALL_PHONE permission, missing steps, and the last attempt (timestamp/number/reason/ok). Reports facts only.',
+      parameters: { type: 'OBJECT', properties: {} }
+    },
+    {
       name: 'read_page',
       description: 'Read the visible text of the CURRENT screen/app (needs Phone automation). Use before answering questions about what is on screen.',
       parameters: { type: 'OBJECT', properties: {} }
@@ -4512,7 +4696,7 @@ function buildSystemPrompt(userText) {
     'MEMORY: you have real long-term memory on this phone. When the user shares something lasting, or says "yaad rakho" / "never forget", call remember with a short English fact, a category and importance (pin:true for a permanent detail). When asked what you remember about a topic, call recall_memory FIRST; never say you forgot before checking. Use forget_memory when the user asks you to forget something. Answer naturally and never read the whole list out.',
     'PERSONALITY PROFILE:\n' + personaPromptBlock(),
     'ASSISTANT 2.2: persona, calendar (local + phone), routine, workspace (GitHub/Slack/Notion/Linear/Jira with local tokens), mcp (remote streamable HTTP), read_page, summarize_text and dictation are available. Use workspace list/summarize before writing; writes need the user to confirm.',
-    'REEL FEATURES: iss_operation gives real ISS position and a phone map; video_operation and image_operation pick/edit local media and produce real saved outputs; commerce_operation manages food/grocery lists and opens services; analytics_operation checks public views/comments; notification_operation sends ntfy alerts when the user has configured a topic; phone_agent_operation prepares a call hand-off. Never claim an order, purchase, call, post, or remote alert happened unless the tool confirms it.',
+    'REEL FEATURES: iss_operation gives real ISS position and a phone map; video_operation and image_operation pick/edit local media and produce real saved outputs; commerce_operation manages food/grocery lists and opens services; analytics_operation checks public views/comments; notification_operation sends ntfy alerts when the user has configured a topic; phone_agent_operation prepares a call hand-off; auto_call fires a real ACTION_CALL only after explicit opt-in and permission; overlay_highlight/overlay_hide control a real overlay. Never claim an order, purchase, call, post, highlight, or remote alert happened unless the tool confirms it. There is no incoming-call interception, call recording or transcript.',
     'DICTATION: dictation action=start types speech into other apps; "scratch that", "capitalize that", "new paragraph", "comma" edit the dictation buffer. It needs Phone automation for direct typing, otherwise text goes to the clipboard.',
     'ROUTINES: routines run only while Jarvis is open or its background service is alive; never promise they run after the app is killed.',
     'CALENDAR: action=add stores locally; pass insert_phone:true when the user wants it in the real phone calendar. Always use the real date/time returned by the tool, never invent it.',
@@ -4586,6 +4770,10 @@ function geminiRequest(model, payload, timeoutMs) {
 }
 
 async function runTool(name, args) {
+  if (name === 'auto_call') return callTool(name, args || {});
+  if (name === 'overlay_highlight') return callTool(name, args || {});
+  if (name === 'overlay_hide') return callTool(name, args || {});
+  if (name === 'call_status') return callTool(name, args || {});
   if (name === 'smart_home') {
     return { ok: true, message: await shSmartHome(args && args.action, args && args.device, args && args.value) };
   }
@@ -5061,10 +5249,12 @@ function renderSettings() {
 
   const about = $('#aboutText');
   if (about) {
-    let v = '2.3.0';
+    let v = '2.3.1';
     let d = 'Android';
     try { v = Native.version(); d = Native.deviceSummary(); } catch (e) { }
-    about.textContent = 'Jarvis Mobile ' + v + ' · ' + d;
+    about.textContent = 'Jarvis Mobile ' + v + ' · ' + d
+      + ' · Overlay: "Display over other apps" izazat chahiye'
+      + ' · Auto-call: explicit opt-in aur Phone calls permission chahiye.';
   }
 }
 
@@ -5695,6 +5885,10 @@ window.jarvisNative = {
         }
         toast('Mic ready.');
       }
+    }
+    if (which === 'call') {
+      toast(granted ? 'Phone calls permission mil gayi. Auto-call ab setup ke baad chal sakta hai.'
+                    : 'Phone calls permission nahi mili. Auto-call block rahega.');
     }
     if (which === 'camera' && granted) toast('Camera permission mil gayi.');
   },

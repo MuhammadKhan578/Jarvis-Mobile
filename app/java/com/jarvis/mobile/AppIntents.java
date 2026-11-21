@@ -1,8 +1,10 @@
 package com.jarvis.mobile;
 
+import android.Manifest;
 import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.hardware.camera2.CameraCharacteristics;
@@ -33,6 +35,15 @@ import java.util.Map;
 
 /** All phone actions Jarvis can perform. Every result is real; nothing is faked. */
 public final class AppIntents {
+
+    /** Same private preferences file the JS bridge uses (settings + call state). */
+    private static final String PREFS = "jarvis_mobile";
+    private static final String KEY_AUTO_CALL_NUMBER = "auto_call_number";
+    private static final String KEY_AUTO_CALL_ENABLED = "auto_call_enabled";
+    private static final String KEY_LAST_TS = "auto_call_last_ts";
+    private static final String KEY_LAST_NUMBER = "auto_call_last_number";
+    private static final String KEY_LAST_REASON = "auto_call_last_reason";
+    private static final String KEY_LAST_OK = "auto_call_last_ok";
 
     private static final Map<String, String> APPS = new LinkedHashMap<>();
     static {
@@ -87,6 +98,13 @@ public final class AppIntents {
                 case "send_whatsapp": return whatsapp(context, args.optString("phone", ""), args.optString("message", ""));
                 case "send_sms": return sms(context, args.optString("phone", ""), args.optString("message", ""));
                 case "call_number": return dial(context, args.optString("phone", ""));
+                case "auto_call": return autoCall(context,
+                        args.optString("number", args.optString("phone", "")),
+                        args.optString("reason", ""));
+                case "overlay_highlight": return overlayHighlight(context, args);
+                case "overlay_hide": return OverlayGuide.get(context).hide();
+                case "overlay_settings": return OverlayGuide.get(context).openSettings();
+                case "call_status": return callStatus(context);
                 case "compose_email": return email(context, args.optString("to", ""), args.optString("subject", ""), args.optString("body", ""));
                 case "open_gmail": return openGmail(context);
                 case "read_inbox": return GmailListener.readForTool(context, args.optInt("limit", 8));
@@ -373,6 +391,175 @@ public final class AppIntents {
         if (digits.isEmpty()) return res(false, "Number bataiye.", false, null);
         boolean ok = start(c, new Intent(Intent.ACTION_DIAL, Uri.parse("tel:" + digits)));
         return res(ok, ok ? "Dialer khol diya." : "Dialer nahi mila.", true, null);
+    }
+
+    // ------------------------------------------------- real auto-call + overlay
+
+    private static SharedPreferences prefs(Context c) {
+        return c.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+    }
+
+    /** Only a real granted CALL_PHONE runtime permission counts. */
+    public static boolean hasCallPermission(Context c) {
+        try {
+            return c.checkSelfPermission(Manifest.permission.CALL_PHONE)
+                    == PackageManager.PERMISSION_GRANTED;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    public static void setAutoCallNumber(Context c, String number) {
+        String digits = sanitizeNumber(number);
+        prefs(c).edit().putString(KEY_AUTO_CALL_NUMBER, digits).apply();
+    }
+
+    public static String getAutoCallNumber(Context c) {
+        return sanitizeNumber(prefs(c).getString(KEY_AUTO_CALL_NUMBER, ""));
+    }
+
+    /** One-time explicit opt-in. Never enabled by a default setting. */
+    public static void setAutoCallEnabled(Context c, boolean enabled) {
+        prefs(c).edit().putBoolean(KEY_AUTO_CALL_ENABLED, enabled).apply();
+    }
+
+    public static boolean getAutoCallEnabled(Context c) {
+        return prefs(c).getBoolean(KEY_AUTO_CALL_ENABLED, false);
+    }
+
+    private static String sanitizeNumber(String raw) {
+        if (raw == null) return "";
+        String s = raw.trim().replaceAll("[^0-9+]", "");
+        int plus = 0;
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < s.length(); i++) {
+            char ch = s.charAt(i);
+            if (ch == '+') { if (i == 0 || plus > 0) continue; plus++; }
+            out.append(ch);
+        }
+        String digits = out.toString();
+        int count = digits.replace("+", "").length();
+        return count >= 5 && count <= 20 ? digits : "";
+    }
+
+    /**
+     * Real ACTION_CALL. Fails closed unless a number is configured, CALL_PHONE
+     * is granted, and the user has explicitly enabled auto-call. ok:true means
+     * only that startActivity(ACTION_CALL) did not throw; it never claims the
+     * call was answered or recorded.
+     */
+    public static String autoCall(Context c, String number, String reason) {
+        String digits = sanitizeNumber(number);
+        String why = reason == null ? "" : reason.trim();
+        if (digits.isEmpty()) digits = getAutoCallNumber(c);
+        if (digits.isEmpty()) {
+            return autoResult(c, "", why, false,
+                    "Auto-call ke liye pehle number setup karein: 'call setup <number>' bolein.", true);
+        }
+        if (!hasCallPermission(c)) {
+            return autoResult(c, digits, why, false,
+                    "CALL_PHONE permission nahi hai. Settings > Apps > Jarvis > Permissions > Phone calls allow karein.", true);
+        }
+        if (!getAutoCallEnabled(c)) {
+            return autoResult(c, digits, why, false,
+                    "Auto-call band hai. Explicit opt-in chahiye: 'auto call on' bolein ya settings mein enable karein.", true);
+        }
+        if (!launchAllowed(c)) {
+            return autoResult(c, digits, why, false,
+                    "Background se call start nahi ho sakti. Jarvis screen par kholein ya Phone automation on karein.", true);
+        }
+        try {
+            Intent call = new Intent(Intent.ACTION_CALL, Uri.parse("tel:" + digits));
+            call.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            launchContext(c).startActivity(call);
+            return autoResult(c, digits, why, true,
+                    "ACTION_CALL bhej diya (startActivity ne error nahi diya). Call screen check karein; "
+                            + "call connect aur recording/transcript Jarvis guarantee nahi karta.", false);
+        } catch (SecurityException e) {
+            return autoResult(c, digits, why, false,
+                    "Android ne call block kiya (SecurityException). Phone calls permission check karein.", true);
+        } catch (Exception e) {
+            return autoResult(c, digits, why, false,
+                    "Call start nahi hua: " + e.getMessage(), true);
+        }
+    }
+
+    /** Records every attempt, successful or not, with timestamp/number/reason/ok. */
+    private static String autoResult(Context c, String number, String reason,
+                                     boolean ok, String message, boolean needsUser) {
+        long ts = System.currentTimeMillis();
+        try {
+            prefs(c).edit()
+                    .putLong(KEY_LAST_TS, ts)
+                    .putString(KEY_LAST_NUMBER, number == null ? "" : number)
+                    .putString(KEY_LAST_REASON, reason == null ? "" : reason)
+                    .putBoolean(KEY_LAST_OK, ok)
+                    .apply();
+        } catch (Exception ignored) { }
+        try {
+            JSONObject attempt = new JSONObject();
+            attempt.put("timestamp_ms", ts);
+            attempt.put("number", number == null ? "" : number);
+            attempt.put("reason", reason == null ? "" : reason);
+            attempt.put("ok", ok);
+            return res(ok, message, needsUser, attempt);
+        } catch (Exception e) {
+            return res(ok, message, needsUser, null);
+        }
+    }
+
+    /** Honest status: what is configured, what is missing, and the last attempt. */
+    private static String callStatus(Context c) {
+        try {
+            String number = getAutoCallNumber(c);
+            boolean enabled = getAutoCallEnabled(c);
+            boolean granted = hasCallPermission(c);
+            SharedPreferences p = prefs(c);
+            List<String> missing = new ArrayList<>();
+            if (number.isEmpty()) missing.add("Number setup karein: 'call setup <number>' bolein.");
+            if (!granted) missing.add("Phone calls (CALL_PHONE) permission allow karein.");
+            if (!enabled) missing.add("Auto-call explicit opt-in karein: 'auto call on' bolein.");
+
+            JSONObject attempt = new JSONObject();
+            attempt.put("timestamp_ms", p.getLong(KEY_LAST_TS, 0L));
+            attempt.put("number", p.getString(KEY_LAST_NUMBER, ""));
+            attempt.put("reason", p.getString(KEY_LAST_REASON, ""));
+            attempt.put("ok", p.getBoolean(KEY_LAST_OK, false));
+
+            JSONArray steps = new JSONArray();
+            for (String step : missing) steps.put(step);
+
+            JSONObject data = new JSONObject();
+            data.put("number", number);
+            data.put("has_number", !number.isEmpty());
+            data.put("auto_call_enabled", enabled);
+            data.put("call_phone_granted", granted);
+            data.put("ready", missing.isEmpty());
+            data.put("missing_steps", steps);
+            data.put("last_attempt", attempt);
+            data.put("overlay_can_draw", OverlayGuide.canDraw(c));
+            data.put("overlay_shown", OverlayGuide.get(c).isShown());
+
+            String msg = missing.isEmpty()
+                    ? "Auto-call ready hai. ACTION_CALL real call start karega; Jarvis recording/transcript nahi karta."
+                    : "Auto-call ready nahi: " + android.text.TextUtils.join(" | ", missing);
+            return res(true, msg, !missing.isEmpty(), data);
+        } catch (Exception e) {
+            return res(false, "Call status nahi mila.", false, null);
+        }
+    }
+
+    private static String overlayHighlight(Context c, JSONObject args) {
+        int x = args.optInt("x", args.optInt("left", -1));
+        int y = args.optInt("y", args.optInt("top", -1));
+        int w = args.optInt("w", args.optInt("width", -1));
+        int h = args.optInt("h", args.optInt("height", -1));
+        String label = args.optString("label", "");
+        if (x >= 0 && y >= 0 && w > 0 && h > 0) {
+            return OverlayGuide.get(c).show(x, y, w, h, label);
+        }
+        if (!label.trim().isEmpty()) return OverlayGuide.get(c).highlightText(label);
+        return res(false, "Highlight ke liye label ya screen bounds (x, y, w, h) do.", false, null);
     }
 
     private static String email(Context c, String to, String subject, String body) {

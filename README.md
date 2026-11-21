@@ -8,13 +8,17 @@ APK with the Android SDK command-line tools.
 
 ## Features
 
-- **Reel feature pack (v2.3.0)** — real ISS lookup with a phone map; native
+- **Reel feature pack (v2.3.1)** — real ISS lookup with a phone map; native
   photo picking and real local edits (crop, resize, rotate, flip, grayscale,
   sepia, blur, text) that never overwrite the original; real MP4 trim using
   Android's media APIs; an honest video/photo editor hand-off; local grocery
   lists and food/grocery service hand-offs; public analytics checks; ntfy
   alerts after confirmation; a confirmation-gated call hand-off; and an honest
   mobile equivalent for Steam/Epic commands. No desktop-only action is faked.
+- **Call + overlay (v2.3.1)** — real `ACTION_CALL` auto-dial after explicit
+  opt-in/permission, call status, and a real screen highlight overlay that asks
+  for "Display over other apps". Android cannot intercept incoming calls or
+  record calls; for "call Jarvis and give commands" use the PC Twilio line.
 - **Bug-fix release (v2.2.1)** — model JSON is always converted into a clean
   chat reply, foreground commands such as “YouTube kholo” work without a wake
   word and always report the real launch result, and microphone restart chimes
@@ -188,7 +192,7 @@ powershell -ExecutionPolicy Bypass -File .\build_apk.ps1 `
   -Sdk "C:\Android\Sdk" -Jdk "C:\Program Files\Java\jdk-17"
 ```
 
-Output: `JarvisMobile.apk` in this folder. Version 2.3.0 (versionCode 14).
+Output: `JarvisMobile.apk` in this folder. Version 2.3.1 (versionCode 15).
 
 On the first build the script creates a local development keystore at
 `keystore/jarvis.keystore` with a random password saved in
