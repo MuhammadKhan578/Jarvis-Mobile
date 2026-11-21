@@ -1006,6 +1006,87 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
         catch (Throwable t) { return "{\"ok\":false,\"message\":\"Media self-test unavailable.\"}"; }
     }
 
+    // --------------------------------------------------------- direct PC link
+    /* Real Wi-Fi link to PC Jarvis. The JS thread is NEVER blocked: each call
+       starts a background thread and posts the real result back through
+       window.jarvisPcLinkResult(requestId, json). The returned string is only
+       an "accepted / error" envelope, never a claimed success. */
+
+    private interface PcLinkJob { String run(); }
+
+    private static String pcErr(String message) {
+        try {
+            JSONObject o = new JSONObject();
+            o.put("ok", false);
+            o.put("message", message == null ? "PC link fail." : message);
+            o.put("needs_user_action", false);
+            return o.toString();
+        } catch (Exception e) {
+            return "{\"ok\":false,\"message\":\"PC link fail.\",\"needs_user_action\":false}";
+        }
+    }
+
+    private static String pcAccepted() {
+        return "{\"ok\":true,\"pending\":true,\"message\":\"PC link request background mein chal raha hai.\"}";
+    }
+
+    private void pcLinkAsync(final String requestId, final PcLinkJob job) {
+        final String id = requestId == null ? "" : requestId;
+        new Thread(() -> {
+            String result;
+            try {
+                result = job.run();
+                if (result == null || result.trim().isEmpty()) result = pcErr("PC ne koi jawab nahi diya.");
+            } catch (Throwable t) {
+                String m = t.getMessage() == null ? t.getClass().getSimpleName() : t.getMessage();
+                result = pcErr("PC link fail: " + m.replace('"', '\''));
+            }
+            callJs("window.jarvisPcLinkResult(" + q(id) + "," + q(result) + ")");
+        }, "jarvis-pc-link").start();
+    }
+
+    @JavascriptInterface
+    public String pcLinkConnect(String host, String port, String code, String requestId) {
+        final int p;
+        try {
+            p = Integer.parseInt(String.valueOf(port == null ? "" : port).trim());
+        } catch (Exception e) {
+            return pcErr("Port galat hai: 1 se 65535 ke beech daalo.");
+        }
+        pcLinkAsync(requestId, () -> DeviceLink.connect(activity, host, p, code));
+        return pcAccepted();
+    }
+
+    @JavascriptInterface
+    public String pcLinkStatus(String requestId) {
+        pcLinkAsync(requestId, () -> DeviceLink.status(activity));
+        return pcAccepted();
+    }
+
+    @JavascriptInterface
+    public String pcLinkDisconnect(String requestId) {
+        pcLinkAsync(requestId, () -> DeviceLink.disconnect(activity));
+        return pcAccepted();
+    }
+
+    @JavascriptInterface
+    public String pcLinkSendFile(String uriOrPath, String requestId) {
+        pcLinkAsync(requestId, () -> DeviceLink.sendFile(activity, uriOrPath));
+        return pcAccepted();
+    }
+
+    @JavascriptInterface
+    public String pcLinkSave(String fileId, String destination, boolean confirmed, String requestId) {
+        pcLinkAsync(requestId, () -> DeviceLink.save(activity, fileId, destination, confirmed));
+        return pcAccepted();
+    }
+
+    @JavascriptInterface
+    public String pcLinkCommand(String text, String requestId) {
+        pcLinkAsync(requestId, () -> DeviceLink.command(activity, text));
+        return pcAccepted();
+    }
+
     // --------------------------------------------------------------- tools
 
     @JavascriptInterface
@@ -1027,7 +1108,7 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
 
     @JavascriptInterface
     public String version() {
-        return "2.3.1";
+        return "2.3.2";
     }
 
     @JavascriptInterface

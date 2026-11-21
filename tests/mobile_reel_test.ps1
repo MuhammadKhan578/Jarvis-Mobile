@@ -7,6 +7,9 @@ $bridge = Join-Path $app 'java\com\jarvis\mobile\JsBridge.java'
 $intents = Join-Path $app 'java\com\jarvis\mobile\AppIntents.java'
 $overlay = Join-Path $app 'java\com\jarvis\mobile\OverlayGuide.java'
 $docs = Join-Path $root 'docs\CALL_AND_OVERLAY.md'
+$pcDocs = Join-Path $root 'docs\PC_LINK.md'
+$deviceLink = Join-Path $app 'java\com\jarvis\mobile\DeviceLink.java'
+$html = Join-Path $app 'assets\www\index.html'
 $build = Join-Path $root 'build_apk.ps1'
 $apk = Join-Path $root 'JarvisMobile.apk'
 $fail = 0
@@ -29,10 +32,13 @@ $intentsText = Get-Content $intents -Raw
 $buildText = Get-Content $build -Raw
 $overlayText = if (Test-Path $overlay) { Get-Content $overlay -Raw } else { '' }
 $docsText = if (Test-Path $docs) { Get-Content $docs -Raw } else { '' }
+$pcDocsText = if (Test-Path $pcDocs) { Get-Content $pcDocs -Raw } else { '' }
+$deviceText = if (Test-Path $deviceLink) { Get-Content $deviceLink -Raw } else { '' }
+$htmlText = if (Test-Path $html) { Get-Content $html -Raw } else { '' }
 
-Check 'app.js version' ($jsText -match "2\.3\.1")
-Check 'manifest version' ($manifestText -match 'versionCode="15"' -and $manifestText -match 'versionName="2\.3\.1"')
-Check 'build script version' ($buildText -match '"2\.3\.1"' -and $buildText -match '\$VersionCode = 15')
+Check 'app.js version' ($jsText -match "2\.3\.2")
+Check 'manifest version' ($manifestText -match 'versionCode="16"' -and $manifestText -match 'versionName="2\.3\.2"')
+Check 'build script version' ($buildText -match '"2\.3\.2"' -and $buildText -match '\$VersionCode = 16')
 Check 'release APK not debuggable in manifest' ($manifestText -notmatch 'android:debuggable="true"')
 
 # Existing reel tools (unchanged).
@@ -103,6 +109,58 @@ Check 'docs/CALL_AND_OVERLAY.md exists' (Test-Path $docs)
 Check 'docs state ACTION_CALL is real' ($docsText -match 'ACTION_CALL')
 Check 'docs state no recording/transcript' ($docsText -match 'transcript')
 Check 'docs state background call limits' ($docsText -match 'Android 10\+')
+
+# --- Direct PC link: real Wi-Fi pair / upload / save / command / intercom ----
+Check 'app.js declares pc_link tool' ($jsText -match "name: 'pc_link'")
+Check 'app.js routes pc_link' ($jsText -match "name === 'pc_link'")
+foreach ($method in @('pcLinkConnect', 'pcLinkStatus', 'pcLinkDisconnect',
+    'pcLinkSendFile', 'pcLinkSave', 'pcLinkCommand')) {
+  Check "bridge $method exists" ($bridgeText -match "public String $method\(")
+  Check "bridge $method is @JavascriptInterface" ($bridgeText -match "@JavascriptInterface\s+public String $method\(")
+  Check "browser fallback $method" ($jsText -match "$($method):")
+}
+Check 'app.js awaits real PC result via jarvisPcLinkResult' ($jsText -match 'window\.jarvisPcLinkResult')
+Check 'app.js intercom flag pcCallActive' ($jsText -match 'pcCallActive')
+Check 'app.js intercom routes STT to pcLinkCommand' ($jsText -match 'pcHandleIntercom\(command\)')
+Check 'app.js intercom restart uses schedulePcListen' ($jsText -match 'schedulePcListen\(')
+Check 'app.js picks any file for PC upload' ($jsText -match "Native\.pickMedia\('any', id\)")
+Check 'app.js local command: PC se connect karo' ($jsText -match 'pc\s+se\s+connect\s+karo')
+Check 'app.js local command: send file to PC' ($jsText -match 'file\s+pc\s+par\s+bhejo')
+Check 'app.js local command: save to PC' ($jsText -match 'pc\s+par')
+Check 'app.js local command: call PC Jarvis' ($jsText -match 'call\s+pc\s+jarvis')
+Check 'AppIntents case pc_link' ($intentsText -match 'case "pc_link":')
+Check 'AppIntents pc_link missing step is explicit' ($intentsText -match 'PC se connect karo: IP, port aur code daalo')
+Check 'DeviceLink.java exists' (Test-Path $deviceLink)
+Check 'DeviceLink stores token in SharedPreferences' ($deviceText -match 'KEY_TOKEN' -and $deviceText -match 'getSharedPreferences\(PREFS')
+Check 'DeviceLink pairs at /link/pair' ($deviceText -match '/link/pair')
+Check 'DeviceLink uploads at /link/upload' ($deviceText -match '/link/upload')
+Check 'DeviceLink saves at /link/save' ($deviceText -match '/link/save')
+Check 'DeviceLink sends canonical id key' ($deviceText -match '\.put\("id", id\)')
+Check 'DeviceLink forwards explicit confirmed flag' ($deviceText -match '\.put\("confirmed", confirmed\)')
+Check 'bridge forwards confirmed save' ($bridgeText -match 'DeviceLink\.save\(activity, fileId, destination, confirmed\)')
+Check 'app.js forwards confirmed save' ($jsText -match '!!confirmed')
+Check 'app.js handles explicit confirm save' ($jsText -match 'save\\s\+confirm\\s\+karo')
+Check 'DeviceLink commands at /link/command' ($deviceText -match '/link/command')
+Check 'DeviceLink sends X-Jarvis-Token header' ($deviceText -match 'X-Jarvis-Token')
+Check 'DeviceLink streams multipart/form-data' ($deviceText -match 'multipart/form-data' -and $deviceText.Contains('name=\"file\"') -and $deviceText.Contains('name=\"filename\"'))
+Check 'DeviceLink uses HttpURLConnection with timeouts' ($deviceText -match 'HttpURLConnection' -and $deviceText -match 'setConnectTimeout' -and $deviceText -match 'setReadTimeout')
+Check 'DeviceLink rejects public HTTP hosts' ($deviceText -match 'isPrivateHost' -and $deviceText -match 'private LAN')
+Check 'DeviceLink requires server ok true for upload' ($deviceText -match 'server\.optBoolean\("ok", false\)')
+Check 'panel exists in index.html' ($htmlText -match 'id="pcLinkPanel"')
+foreach ($id in @('pcHost', 'pcPort', 'pcCode', 'pcConnectBtn', 'pcStatusBtn',
+    'pcDisconnectBtn', 'pcCallBtn', 'pcLinkState')) {
+  Check "panel element #$id" ($htmlText -match "id=`"$id`"")
+}
+Check 'panel default port 8766' ($htmlText -match 'value="8766"')
+Check 'panel states no phone number' ($htmlText -match 'phone call nahi hai')
+Check 'docs/PC_LINK.md exists' (Test-Path $pcDocs)
+Check 'docs state same Wi-Fi and no internet' ($pcDocsText -match 'same Wi-Fi' -and $pcDocsText -match 'internet')
+Check 'docs state token required' ($pcDocsText -match 'token')
+Check 'docs state this is not a phone call' ($pcDocsText -match 'phone call nahi hai')
+Check 'docs state real calls need PC Twilio line' ($pcDocsText -match 'Twilio')
+Check 'docs include any-file examples' ($pcDocsText -match 'zip' -and $pcDocsText -match 'video')
+Check 'docs give save examples' ($pcDocsText -match 'Downloads mein save karo' -and $pcDocsText -match 'D:\\backup\\file.zip')
+Check 'docs give intercom stop words' ($pcDocsText -match 'band karo' -and $pcDocsText -match 'goodbye')
 
 if (Get-Command node -ErrorAction SilentlyContinue) {
   & node --check $js 2>&1 | Out-Null

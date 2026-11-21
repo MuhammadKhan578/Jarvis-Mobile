@@ -28,6 +28,7 @@ import org.json.JSONObject;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -105,6 +106,7 @@ public final class AppIntents {
                 case "overlay_hide": return OverlayGuide.get(context).hide();
                 case "overlay_settings": return OverlayGuide.get(context).openSettings();
                 case "call_status": return callStatus(context);
+                case "pc_link": return pcLink(context, args);
                 case "compose_email": return email(context, args.optString("to", ""), args.optString("subject", ""), args.optString("body", ""));
                 case "open_gmail": return openGmail(context);
                 case "read_inbox": return GmailListener.readForTool(context, args.optInt("limit", 8));
@@ -546,6 +548,76 @@ public final class AppIntents {
             return res(true, msg, !missing.isEmpty(), data);
         } catch (Exception e) {
             return res(false, "Call status nahi mila.", false, null);
+        }
+    }
+
+    /**
+     * Real phone <-> PC Jarvis direct link. Every operation reports the PC's own
+     * response. Missing steps are explicit; nothing is marked done on failure.
+     * "call" is a Wi-Fi voice intercom, never a phone call.
+     */
+    private static String pcLink(Context c, JSONObject args) {
+        try {
+            String action = args.optString("action", "status").trim().toLowerCase(Locale.US);
+            if ("connect".equals(action)) {
+                String host = args.optString("host", "");
+                String portText = args.optString("port", "8766");
+                int port;
+                try { port = Integer.parseInt(portText.trim()); }
+                catch (Exception e) { port = -1; }
+                if (host.trim().isEmpty() || port < 1 || port > 65535 || args.optString("code", "").trim().isEmpty()) {
+                    return res(false, "PC se connect karo: IP, port aur code daalo", true, null);
+                }
+                return wrapPcResult(DeviceLink.connect(c, host, port, args.optString("code", "")));
+            }
+            if ("status".equals(action)) return wrapPcResult(DeviceLink.status(c));
+            if ("disconnect".equals(action)) return wrapPcResult(DeviceLink.disconnect(c));
+            if ("send".equals(action)) {
+                String source = args.optString("uri_or_path", args.optString("path", args.optString("uri", "")));
+                return wrapPcResult(DeviceLink.sendFile(c, source));
+            }
+            if ("save".equals(action)) {
+                return wrapPcResult(DeviceLink.save(c,
+                        args.optString("file_id", args.optString("id", DeviceLink.lastFileId(c))),
+                        args.optString("destination", args.optString("path", DeviceLink.lastDestination(c))),
+                        args.optBoolean("confirmed", false)));
+            }
+            if ("command".equals(action)) {
+                return wrapPcResult(DeviceLink.command(c, args.optString("text", args.optString("message", ""))));
+            }
+            if ("call".equals(action)) {
+                JSONObject st = new JSONObject(DeviceLink.status(c));
+                JSONObject data = new JSONObject();
+                data.put("start_intercom", true);
+                data.put("is_phone_call", false);
+                if (!st.optBoolean("paired", false)) {
+                    return res(false, st.optString("message", "PC se connect karo: IP, port aur code daalo"), true, data);
+                }
+                return res(false, "Ye phone call nahi hai. Intercom shuru karne ke liye 'PC Jarvis ko call karo' bolein ya Connect panel me Call PC Jarvis dabaiye.", true, data);
+            }
+            return res(false, "PC link action: connect, status, disconnect, send, save, command ya call.", true, null);
+        } catch (Exception e) {
+            return res(false, "PC link fail hua: " + e.getMessage(), false, null);
+        }
+    }
+
+    /** Keeps DeviceLink's real fields in data; never upgrades a failed result. */
+    private static String wrapPcResult(String raw) {
+        try {
+            JSONObject r = new JSONObject(raw == null || raw.trim().isEmpty() ? "{}" : raw);
+            boolean ok = r.optBoolean("ok", false);
+            boolean needs = r.optBoolean("needs_user_action", !ok);
+            String message = r.optString("message", ok ? "PC Jarvis ne jawab diya." : "PC link fail.");
+            JSONObject data = new JSONObject();
+            Iterator<String> keys = r.keys();
+            while (keys.hasNext()) {
+                String k = keys.next();
+                if ("ok".equals(k) || "message".equals(k) || "needs_user_action".equals(k)) continue;
+                try { data.put(k, r.get(k)); } catch (Exception ignored) { }
+            }
+            return res(ok, message, needs, data);
+        } catch (Exception e) {
+            return res(false, "PC link jawab nahi samajh aaya: " + e.getMessage(), false, null);
         }
     }
 

@@ -126,7 +126,7 @@ const Native = window.Android || {
   },
   executeTool: () => JSON.stringify({ ok: false, message: 'Native tools available nahi hain.' }),
   getStatus: () => JSON.stringify({ ok: true, data: { online: navigator.onLine, battery: -1, network: 'unknown' } }),
-  version: () => '2.3.1-web',
+  version: () => '2.3.2-web',
   deviceSummary: () => 'Browser',
   toast: (m) => window.jarvisToast && window.jarvisToast(m),
   vibrate: () => { },
@@ -171,6 +171,13 @@ const Native = window.Android || {
   setAutoCallEnabled: () => { },
   getAutoCallEnabled: () => false,
   autoCall: () => JSON.stringify({ ok: false, needs_user_action: true, message: 'Auto-call Android par hi available hai.' }),
+  // Direct PC link is Android-only. Never pretend a browser can pair/upload.
+  pcLinkConnect: () => JSON.stringify({ ok: false, needs_user_action: true, message: 'PC link Android build mein hi available hai.' }),
+  pcLinkStatus: () => JSON.stringify({ ok: false, paired: false, message: 'PC link Android build mein hi available hai.' }),
+  pcLinkDisconnect: () => JSON.stringify({ ok: false, message: 'PC link Android build mein hi available hai.' }),
+  pcLinkSendFile: () => JSON.stringify({ ok: false, needs_user_action: true, message: 'Upload Android build mein hi available hai.' }),
+  pcLinkSave: () => JSON.stringify({ ok: false, needs_user_action: true, message: 'PC par save Android build mein hi available hai.' }),
+  pcLinkCommand: () => JSON.stringify({ ok: false, message: 'PC Jarvis intercom Android build mein hi available hai.' }),
   openUrl: (u) => { try { window.open(u, '_blank'); } catch (e) { } }
 };
 
@@ -210,7 +217,7 @@ const FAST_TERMINAL_TOOLS = new Set([
   'set_volume', 'torch', 'share_text', 'open_play_store', 'install_app',
   'smart_home', 'smart_scene', 'smart_home_setup', 'smart_home_help',
   'news_brief', 'remember', 'device_status',
-  'auto_call', 'overlay_highlight', 'overlay_hide', 'call_status'
+  'auto_call', 'overlay_highlight', 'overlay_hide', 'call_status', 'pc_link'
 ]);
 // Opening an app can be the first step of a longer automation ("Instagram
 // kholo aur story post karo"), so these only get the shortcut for a short,
@@ -618,6 +625,14 @@ let voicesRetry = null;
 let toastTimer = null;
 let reqSeq = 0;
 const pendingRequests = {};
+
+/* ---- direct PC link (Wi-Fi) state. Intercom is explicit, never a phone call. */
+let pcCallActive = false;
+let pcPaired = false;
+let pcLastFileId = '';
+let pcLinkSeq = 0;
+const pcLinkPending = {};
+const pendingPcSendPick = {};
 
 /* ============================================================ SMART HOME */
 /* The virtual home works with no setup. Optional Home Assistant mirroring uses
@@ -1639,6 +1654,11 @@ function finishSpeaking() {
   // Native speech engine released the mic on TTS completion; in background
   // mode it restarts the recognizer by itself, so no JS timer is needed.
   try { Native.holdListening(false); } catch (e) { }
+  if (pcCallActive && !micMuted && appActive) {
+    // Intercom opt-in only: keep taking turns until "band karo" / "goodbye".
+    schedulePcListen(350);
+    return;
+  }
   if (bgMode()) {
     try { Native.setAutoListen(true); } catch (e) { }
     return;
@@ -1892,6 +1912,8 @@ function parseNativeResult(raw) {
 }
 
 function callTool(name, args) {
+  // Real direct link to PC Jarvis (Wi-Fi). Never a phone call.
+  if (name === 'pc_link') return pcLinkTool(args || {});
   // Real auto-call: never enabled by default; the native side checks number,
   // CALL_PHONE permission and the explicit opt-in before ACTION_CALL.
   if (name === 'auto_call') {
@@ -1970,6 +1992,257 @@ function callTool(name, args) {
   if (!result || typeof result !== 'object') result = { ok: false, message: 'Bad tool result' };
   if (typeof result.ok !== 'boolean') result.ok = false;
   return result;
+}
+
+/* ==================================================== DIRECT PC LINK (Wi-Fi) */
+/* Real pair / upload / save / command against PC Jarvis. The native side works
+   on background threads and delivers the REAL server response here. No fake
+   upload, no fake save, no phone number: this is a LAN voice intercom. */
+function pcLinkLoad() {
+  return loadJSON('jv.pcLink', {});
+}
+function pcLinkSaveLocal(host, port) {
+  const all = pcLinkLoad();
+  saveJSON('jv.pcLink', Object.assign({}, all, { host: String(host || ''), port: String(port || '8766') }));
+}
+function pcLinkPaint(r) {
+  if (r && typeof r.paired === 'boolean') pcPaired = !!r.paired;
+  const el = $('#pcLinkState');
+  if (!el) return;
+  const mode = pcCallActive ? 'Calling PC Jarvis…' : (pcPaired ? 'Paired with PC' : 'Not paired');
+  const detail = r && r.message ? ' · ' + String(r.message).slice(0, 130) : ' · server status unknown';
+  el.textContent = mode + detail;
+}
+function pcLinkInvoke(method, args, timeoutMs) {
+  return new Promise(resolve => {
+    if (!hasNative || typeof Native[method] !== 'function') {
+      resolve({ ok: false, needs_user_action: true, message: 'PC link Android build mein hi available hai.' });
+      return;
+    }
+    const id = 'pcl' + (++pcLinkSeq);
+    const timer = setTimeout(() => {
+      if (!pcLinkPending[id]) return;
+      delete pcLinkPending[id];
+      resolve({ ok: false, needs_user_action: true, message: 'PC ka jawab nahi mila (timeout).' });
+    }, timeoutMs || 25000);
+    pcLinkPending[id] = { resolve, timer };
+    try {
+      const accepted = Native[method].apply(Native, args.concat([id]));
+      // "accepted" is only an envelope; success is never claimed here.
+      if (accepted) {
+        let a = null;
+        try { a = JSON.parse(accepted); } catch (e) { }
+        if (a && a.ok === false && a.pending !== true && pcLinkPending[id]) {
+          delete pcLinkPending[id];
+          clearTimeout(timer);
+          resolve(a);
+        }
+      }
+    } catch (e) {
+      if (!pcLinkPending[id]) return;
+      delete pcLinkPending[id];
+      clearTimeout(timer);
+      resolve({ ok: false, needs_user_action: true, message: 'PC link call fail: ' + e });
+    }
+  });
+}
+window.jarvisPcLinkResult = function (id, json) {
+  const p = pcLinkPending[id];
+  if (!p) return;
+  delete pcLinkPending[id];
+  clearTimeout(p.timer);
+  let result;
+  try { result = JSON.parse(json); } catch (e) { result = { ok: false, message: String(json) }; }
+  if (!result || typeof result !== 'object') result = { ok: false, message: 'Bad PC link result' };
+  if (typeof result.ok !== 'boolean') result.ok = false;
+  p.resolve(result);
+};
+function pcLinkConnect(host, port, code) {
+  return pcLinkInvoke('pcLinkConnect', [host, port, code], 25000).then(r => { pcLinkPaint(r); return r; });
+}
+function pcLinkStatus() {
+  return pcLinkInvoke('pcLinkStatus', [], 12000).then(r => { pcLinkPaint(r); return r; });
+}
+function pcLinkDisconnect() {
+  return pcLinkInvoke('pcLinkDisconnect', [], 12000).then(r => { pcLinkPaint(r); return r; });
+}
+function pcLinkSendFile(source) {
+  return pcLinkInvoke('pcLinkSendFile', [source], 180000).then(r => {
+    if (r && r.ok && r.id) {
+      pcLastFileId = String(r.id);
+      saveJSON('jv.pcLink', Object.assign(pcLinkLoad(), { fileId: pcLastFileId }));
+    }
+    pcLinkPaint(r);
+    return r;
+  });
+}
+function pcLinkSave(fileId, destination, confirmed) {
+  const dest = String(destination || pcLinkLoad().lastDestination || '');
+  return pcLinkInvoke('pcLinkSave', [fileId || pcLastFileId || '', dest, !!confirmed], 25000).then(r => {
+    if (dest) saveJSON('jv.pcLink', Object.assign(pcLinkLoad(), { lastDestination: dest }));
+    pcLinkPaint(r);
+    return r;
+  });
+}
+function pcLinkCommand(text) {
+  return pcLinkInvoke('pcLinkCommand', [text], 25000).then(r => { pcLinkPaint(r); return r; });
+}
+function pcLinkTool(args) {
+  const a = String((args && args.action) || 'status').toLowerCase().trim();
+  if (a === 'connect') {
+    const host = String((args && (args.host || args.ip)) || '').trim();
+    const port = String((args && args.port) || '8766').trim();
+    const code = String((args && args.code) || '').trim();
+    if (!host || !port || !code) {
+      return Promise.resolve({ ok: false, needs_user_action: true, message: 'PC se connect karo: IP, port aur code daalo' });
+    }
+    return pcLinkConnect(host, port, code).then(r => {
+      if (r && r.ok) pcLinkSaveLocal(host, port);
+      return r;
+    });
+  }
+  if (a === 'status') return pcLinkStatus();
+  if (a === 'disconnect') return pcLinkDisconnect();
+  if (a === 'send') {
+    const source = String((args && (args.uri_or_path || args.path || args.uri)) || '').trim();
+    if (!source) return Promise.resolve({ ok: false, needs_user_action: true, message: 'File chuno: "ye file PC par bhejo" bolein.' });
+    return pcLinkSendFile(source);
+  }
+  if (a === 'save') {
+    return pcLinkSave(
+      String((args && (args.file_id || args.id)) || pcLastFileId || ''),
+      String((args && (args.destination || args.path || args.where)) || ''),
+      !!(args && (args.confirmed || args.confirm))
+    );
+  }
+  if (a === 'command') {
+    return pcLinkCommand(String((args && (args.text || args.message)) || ''));
+  }
+  if (a === 'call') return pcCallStart();
+  return Promise.resolve({ ok: false, needs_user_action: true, message: 'PC link action: connect, status, disconnect, send, save, command ya call.' });
+}
+/** Extracts "Downloads", "D:\\backup\\file.zip" etc. from a save command. */
+function pcDestination(text) {
+  const s = String(text || '').trim();
+  let m = s.match(/^(?:pc|pc jarvis)\s+(?:par|pe|pr|on)\s+([\s\S]+?)\s+save\s+karo\b/i);
+  if (!m) m = s.match(/^save\s+(?:it\s+)?(?:to|karo)\s+([\s\S]+)$/i);
+  if (!m) m = s.match(/^([\s\S]+?)\s+(?:pc\s+jarvis\s+par|pc\s+par|pc\s+pe)\s+save\s+karo\b/i);
+  if (!m) m = s.match(/^([\s\S]+?)\s+mein\s+save\s+karo\b/i);
+  if (!m) return '';
+  return String(m[1])
+    .replace(/^(?:mein|me|mai|the)\s+/i, '')
+    .replace(/\s+(?:mein|me|mai|par|pe|pr|to|folder|path)$/i, '')
+    .replace(/^['"]|['"]$/g, '')
+    .trim();
+}
+function pcOpenPanel() {
+  openSheet('pcLinkPanel');
+}
+function renderPcLink() {
+  const cached = pcLinkLoad();
+  const host = $('#pcHost');
+  const port = $('#pcPort');
+  if (host && !host.value && cached.host) host.value = cached.host;
+  if (port && !port.value) port.value = cached.port || '8766';
+  pcLinkPaint(null);
+  pcLinkStatus().then(r => {
+    if (r && r.host) {
+      if (host && !host.value) host.value = r.host;
+      if (port) port.value = String(r.port || port.value || '8766');
+    }
+  });
+}
+/** Picker result arrives on the SAME jarvisMediaPicked callback as other picks. */
+async function pcPickAndSend() {
+  if (!reelNative('pickMedia')) {
+    return { ok: false, needs_user_action: true, message: 'Is build mein file picker available nahi hai.' };
+  }
+  const st = await pcLinkStatus();
+  if (!st.paired) {
+    pcOpenPanel();
+    return { ok: false, needs_user_action: true, message: st.message || 'PC se connect karo: IP, port aur code daalo' };
+  }
+  const picked = await new Promise(resolve => {
+    const id = 'pcsend' + (++pcLinkSeq);
+    const timer = setTimeout(() => {
+      if (!pendingPcSendPick[id]) return;
+      delete pendingPcSendPick[id];
+      resolve({ ok: false, needs_user_action: true, message: 'File select nahi hua.' });
+    }, 180000);
+    pendingPcSendPick[id] = { resolve, timer };
+    try { Native.pickMedia('any', id); }
+    catch (e) {
+      delete pendingPcSendPick[id];
+      clearTimeout(timer);
+      resolve({ ok: false, needs_user_action: true, message: 'File picker start fail: ' + e });
+    }
+  });
+  if (!picked.ok) return picked;
+  const source = String(picked.uri || picked.path || '').trim();
+  if (!source) return { ok: false, needs_user_action: true, message: 'File ka source nahi mila.' };
+  addSystemLine('FILE · ' + (picked.name || source) + ' → PC');
+  return pcLinkSendFile(source);
+}
+/** Wi-Fi voice intercom. PC reply is spoken, then the mic is re-armed. */
+function schedulePcListen(delay) {
+  clearTimeout(listenTimer);
+  if (!pcCallActive || micMuted || !appActive || busy || state !== 'idle') return;
+  listenTimer = setTimeout(() => {
+    if (!pcCallActive || micMuted || !appActive || busy || state !== 'idle') return;
+    startListening(false);
+  }, delay == null ? 400 : delay);
+}
+async function pcCallStart() {
+  const st = await pcLinkStatus();
+  if (!st.paired) {
+    pcOpenPanel();
+    const msg = 'PC se connect karo: IP, port aur code daalo. Ye phone call nahi hai, Wi-Fi intercom hai.';
+    respond(msg, msg);
+    return { ok: false, needs_user_action: true, message: msg };
+  }
+  pcCallActive = true;
+  pcLinkPaint(null);
+  const btn = $('#pcCallBtn');
+  if (btn) btn.textContent = 'End PC Call';
+  addSystemLine('PC INTERCOM · Calling PC Jarvis…');
+  const msg = 'PC Jarvis se Wi-Fi intercom chal raha hai. Bolo, main seedha PC tak pahuncha dunga. Band karne ke liye "band karo" ya "goodbye" kaho.';
+  respond(msg, msg);
+  return { ok: true, needs_user_action: false, message: msg };
+}
+function pcCallStop(silent) {
+  pcCallActive = false;
+  clearTimeout(listenTimer);
+  pcLinkPaint(null);
+  const btn = $('#pcCallBtn');
+  if (btn) btn.textContent = 'Call PC Jarvis';
+  if (!silent) {
+    const msg = 'PC Jarvis intercom band kar diya.';
+    respond(msg, msg);
+  }
+}
+async function pcHandleIntercom(text) {
+  const low = String(text || '').toLowerCase().trim();
+  if (/^(?:band karo|band|stop|goodbye|good bye|disconnect|bas|khalaas)\b/.test(low) ||
+      /\b(?:band karo|goodbye|disconnect)\b[^.]{0,30}\b(?:pc|intercom|call)\b/.test(low)) {
+    pcCallStop();
+    return;
+  }
+  hideWelcome();
+  addBubble('user', text);
+  addSystemLine('YOU → PC · ' + text);
+  setState('thinking');
+  try { Native.holdListening(true); } catch (e) { }
+  try {
+    const r = await pcLinkCommand(text);
+    toolLog('pc_link command', r);
+    const reply = String((r && (r.reply || r.message)) || 'PC ne jawab nahi diya.');
+    addSystemLine('PC JARVIS → ' + reply);
+    respond(reply, reply);
+  } finally {
+    try { Native.holdListening(false); } catch (e) { }
+    setState('idle');
+    schedulePcListen(500); // keep the Wi-Fi call alive for the next command
+  }
 }
 
 function toolLog(name, result) {
@@ -2446,6 +2719,58 @@ async function localCommand(text) {
   }
   if (/^(help|madad|kya kar sakte ho|what can you do)/.test(low)) {
     respond(LINES.help.roman, LINES.help.urdu);
+    return true;
+  }
+
+  // Real direct link to PC Jarvis over Wi-Fi. These are NOT phone calls.
+  if (/\b(?:pc\s+se\s+connect\s+karo|connect\s+to\s+pc|connect\s+pc|pc\s+pair\s+karo|pair\s+pc|pc\s+se\s+jodo)\b/.test(low)) {
+    pcOpenPanel();
+    const msg = 'Connect panel khul gaya, sir. PC ka LAN IP, port 8766 aur code daalo, phir Connect dabaiye.';
+    respond(msg, msg);
+    return true;
+  }
+  if (/^(?:pc\s+link\s+status|pc\s+status|pc\s+se\s+status\s+batao)$/.test(low)) {
+    const r = await pcLinkStatus();
+    toolLog('pc_link status', r);
+    respond(String(r.message || 'PC status nahi mila.'), String(r.message || 'PC status nahi mila.'));
+    return true;
+  }
+  if (/\b(?:ye\s+file\s+pc\s+par\s+bhejo|file\s+pc\s+par\s+bhejo|pc\s+par\s+file\s+bhejo|send\s+(?:this\s+)?file\s+to\s+pc|ye\s+file\s+bhejo\s+pc\s+par)\b/.test(low)) {
+    const r = await pcPickAndSend();
+    toolLog('pc_link send', r);
+    respond(String(r.message || 'Upload nahi hua.'), String(r.message || 'Upload nahi hua.'));
+    return true;
+  }
+  if (/\b(?:pc\s+jarvis\s+ko\s+call\s+karo|call\s+pc\s+jarvis|pc\s+se\s+baat\s+karo|pc\s+jarvis\s+se\s+baat\s+karo|pc\s+intercom\s+chalao|pc\s+jarvis\s+se\s+baat)\b/.test(low)) {
+    await pcCallStart(); // speaks its own honest status; no double answer
+    return true;
+  }
+  if (/^(?:pc\s+intercom\s+(?:band\s+karo|stop)|pc\s+call\s+(?:band\s+karo|stop|disconnect)|intercom\s+band\s+karo|pc\s+link\s+disconnect)$/.test(low)) {
+    pcCallStop();
+    return true;
+  }
+  if (/^(?:yes|haan|han|confirm(?:\s+save)?|ok(?:ay)?\s+save|save\s+confirm\s+karo|overwrite\s+confirm\s+karo)[.!]?$/.test(low)) {
+    const cached = pcLinkLoad();
+    if (!cached.lastDestination) {
+      const msg = 'Pehle PC par destination batao, phir confirm karo.';
+      respond(msg, msg);
+      return true;
+    }
+    const r = await pcLinkSave('', cached.lastDestination, true);
+    toolLog('pc_link confirm', r);
+    respond(String(r.message || 'Confirm nahi hua.'), String(r.message || 'Confirm nahi hua.'));
+    return true;
+  }
+  if (/\bsave\b/.test(low) && (/\bpc\b/.test(low) || /^save\s+(?:it\s+)?to\b/.test(low) || /\bmein\s+save\s+karo\b/.test(low))) {
+    const dest = pcDestination(text);
+    if (!dest) {
+      const msg = 'PC par kahan save karna hai? Jaise "PC par Downloads mein save karo" ya "D:\\backup\\file.zip mein save karo".';
+      respond(msg, msg);
+      return true;
+    }
+    const r = await pcLinkSave('', dest);
+    toolLog('pc_link save', r);
+    respond(String(r.message || 'Save nahi hua.'), String(r.message || 'Save nahi hua.'));
     return true;
   }
 
@@ -3427,7 +3752,7 @@ async function mcpInitialize(name) {
   return mcpRpc(name, 'initialize', {
     protocolVersion: '2024-11-05',
     capabilities: {},
-    clientInfo: { name: 'jarvis-mobile', version: '2.3.1' }
+    clientInfo: { name: 'jarvis-mobile', version: '2.3.2' }
   });
 }
 async function mcpListTools(name) {
@@ -3706,6 +4031,17 @@ const pendingMediaTrim = {};
 let mediaSeq = 0;
 
 window.jarvisMediaPicked = function (id, json) {
+  // PC upload picker uses the same native callback as the media tools.
+  const pc = pendingPcSendPick[id];
+  if (pc) {
+    delete pendingPcSendPick[id];
+    clearTimeout(pc.timer);
+    let picked;
+    try { picked = JSON.parse(json); } catch (e) { picked = { ok: false, message: String(json) }; }
+    if (!picked || typeof picked !== 'object') picked = { ok: false, message: 'Bad picker result' };
+    pc.resolve(picked);
+    return;
+  }
   const p = pendingMediaPick[id];
   if (!p) return;
   delete pendingMediaPick[id];
@@ -4628,6 +4964,24 @@ function toolDeclarations() {
       parameters: { type: 'OBJECT', properties: {} }
     },
     {
+      name: 'pc_link',
+      description: 'REAL direct Wi-Fi link to PC Jarvis on the same LAN. action=connect needs host (private LAN IP or .local), port (default 8766) and the code shown by PC Jarvis; status/disconnect manage the saved token; send uploads a file by content URI or path; save tells the PC where to store the last uploaded file (the PC still enforces confirmation); command posts text and returns the PC reply; call starts a Wi-Fi voice intercom, NOT a phone call. Never claim success unless the PC response says ok.',
+      parameters: {
+        type: 'OBJECT',
+        properties: {
+          action: { type: 'STRING', description: 'connect, status, disconnect, send, save, command or call' },
+          host: { type: 'STRING', description: 'PC LAN IP, e.g. 192.168.1.20, or name.local' },
+          port: { type: 'INTEGER', description: 'Default 8766' },
+          code: { type: 'STRING', description: 'One-time code printed by PC Jarvis' },
+          uri_or_path: { type: 'STRING', description: 'Content URI or file path for action=send' },
+          file_id: { type: 'STRING', description: 'Upload id returned by send; empty uses the last upload' },
+          destination: { type: 'STRING', description: 'PC destination for action=save, e.g. Downloads or D:\\backup\\file.zip' },
+          text: { type: 'STRING', description: 'Message for action=command' }
+        },
+        required: ['action']
+      }
+    },
+    {
       name: 'read_page',
       description: 'Read the visible text of the CURRENT screen/app (needs Phone automation). Use before answering questions about what is on screen.',
       parameters: { type: 'OBJECT', properties: {} }
@@ -4770,6 +5124,7 @@ function geminiRequest(model, payload, timeoutMs) {
 }
 
 async function runTool(name, args) {
+  if (name === 'pc_link') return pcLinkTool(args || {});
   if (name === 'auto_call') return callTool(name, args || {});
   if (name === 'overlay_highlight') return callTool(name, args || {});
   if (name === 'overlay_hide') return callTool(name, args || {});
@@ -5249,7 +5604,7 @@ function renderSettings() {
 
   const about = $('#aboutText');
   if (about) {
-    let v = '2.3.1';
+    let v = '2.3.2';
     let d = 'Android';
     try { v = Native.version(); d = Native.deviceSummary(); } catch (e) { }
     about.textContent = 'Jarvis Mobile ' + v + ' · ' + d
@@ -5337,6 +5692,7 @@ function openSheet(id) {
   if (id === 'routineSheet') renderRoutines();
   if (id === 'workSheet') { renderWorkInputs(); }
   if (id === 'mcpSheet') renderMcp();
+  if (id === 'pcLinkPanel') renderPcLink();
 }
 
 function closeSheets() {
@@ -5807,7 +6163,14 @@ window.jarvisNative = {
 
     if (!command) {
       setState('idle');
+      if (pcCallActive) schedulePcListen(500);
       if (settings.handsFree) scheduleListen(500);
+      return;
+    }
+    // Wi-Fi intercom: the next final STT result goes to PC Jarvis, not Gemini
+    // or AppIntents. Wake-word gating above is deliberately unchanged.
+    if (pcCallActive) {
+      pcHandleIntercom(command);
       return;
     }
     handleCommand(command);
@@ -5828,6 +6191,11 @@ window.jarvisNative = {
         try { Native.holdListening(false); Native.setAutoListen(true); } catch (e) { }
         if (state !== 'listening') setState('listening');
         if (stateLabelEl) stateLabelEl.textContent = 'BOLIYE...';
+        return;
+      }
+      if (pcCallActive && !micMuted && !busy) {
+        setState('idle');
+        schedulePcListen(900);
         return;
       }
       emptyListens = Math.min(emptyListens + 1, 6);
@@ -5976,6 +6344,38 @@ function bindEvents() {
   $('#workClose').addEventListener('click', closeSheets);
   $('#mcpClose').addEventListener('click', closeSheets);
   $('#overlay').addEventListener('click', closeSheets);
+
+  // Real PC link panel. All network work is inside the native async bridge.
+  const btnPcLink = $('#btnPcLink');
+  if (btnPcLink) btnPcLink.addEventListener('click', pcOpenPanel);
+  const pcLinkClose = $('#pcLinkClose');
+  if (pcLinkClose) pcLinkClose.addEventListener('click', closeSheets);
+  const pcConnectBtn = $('#pcConnectBtn');
+  if (pcConnectBtn) pcConnectBtn.addEventListener('click', async () => {
+    const host = String(($('#pcHost') || {}).value || '').trim();
+    const port = String(($('#pcPort') || {}).value || '8766').trim();
+    const code = String(($('#pcCode') || {}).value || '').trim();
+    if (!host || !port || !code) { toast('IP, port aur code daalo.'); return; }
+    const r = await pcLinkConnect(host, port, code);
+    if (r && r.ok) pcLinkSaveLocal(host, port);
+    toast(String((r && r.message) || 'PC link jawab nahi mila.'));
+  });
+  const pcStatusBtn = $('#pcStatusBtn');
+  if (pcStatusBtn) pcStatusBtn.addEventListener('click', async () => {
+    const r = await pcLinkStatus();
+    toast(String((r && r.message) || 'Status nahi mila.'));
+  });
+  const pcDisconnectBtn = $('#pcDisconnectBtn');
+  if (pcDisconnectBtn) pcDisconnectBtn.addEventListener('click', async () => {
+    if (pcCallActive) pcCallStop(true);
+    const r = await pcLinkDisconnect();
+    toast(String((r && r.message) || 'Disconnect nahi hua.'));
+  });
+  const pcCallBtn = $('#pcCallBtn');
+  if (pcCallBtn) pcCallBtn.addEventListener('click', async () => {
+    if (pcCallActive) pcCallStop();
+    else await pcCallStart();
+  });
 
   $$('#modelSeg button').forEach(b => b.addEventListener('click', () => {
     settings.model = b.dataset.model === 'smart' ? 'smart' : 'fast';

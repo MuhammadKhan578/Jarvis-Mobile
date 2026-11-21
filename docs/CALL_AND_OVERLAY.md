@@ -2,7 +2,7 @@
 
 These are **real device actions**, not simulations. No call success, overlay, or
 transcript is ever reported unless the native Android API returned a real result.
-The release build stays non-debuggable, version `2.3.1` / `versionCode 15`, and
+The release build stays non-debuggable, version `2.3.2` / `versionCode 16`, and
 tap-to-talk remains the default (hands-free and background wake word are opt-in).
 
 ## 1. Permissions (declared in `app/AndroidManifest.xml`)

@@ -19,6 +19,10 @@ APK with the Android SDK command-line tools.
   opt-in/permission, call status, and a real screen highlight overlay that asks
   for "Display over other apps". Android cannot intercept incoming calls or
   record calls; for "call Jarvis and give commands" use the PC Twilio line.
+- **Device Link (v2.3.2)** — pair with the PC Jarvis over the same Wi-Fi using a
+  one-time code, send any photo/zip/video/document straight into PC Jarvis, hear
+  it ask where to save, then say the destination (and confirm an overwrite).
+  "PC Jarvis ko call karo" starts a Wi‑Fi voice intercom — no phone number.
 - **Bug-fix release (v2.2.1)** — model JSON is always converted into a clean
   chat reply, foreground commands such as “YouTube kholo” work without a wake
   word and always report the real launch result, and microphone restart chimes
@@ -192,7 +196,7 @@ powershell -ExecutionPolicy Bypass -File .\build_apk.ps1 `
   -Sdk "C:\Android\Sdk" -Jdk "C:\Program Files\Java\jdk-17"
 ```
 
-Output: `JarvisMobile.apk` in this folder. Version 2.3.1 (versionCode 15).
+Output: `JarvisMobile.apk` in this folder. Version 2.3.2 (versionCode 16).
 
 On the first build the script creates a local development keystore at
 `keystore/jarvis.keystore` with a random password saved in
