@@ -126,7 +126,7 @@ const Native = window.Android || {
   },
   executeTool: () => JSON.stringify({ ok: false, message: 'Native tools available nahi hain.' }),
   getStatus: () => JSON.stringify({ ok: true, data: { online: navigator.onLine, battery: -1, network: 'unknown' } }),
-  version: () => '2.3.3-web',
+  version: () => '2.3.4-web',
   deviceSummary: () => 'Browser',
   toast: (m) => window.jarvisToast && window.jarvisToast(m),
   vibrate: () => { },
@@ -170,6 +170,12 @@ const Native = window.Android || {
   getAutoCallNumber: () => '',
   setAutoCallEnabled: () => { },
   getAutoCallEnabled: () => false,
+  voiceEnrollStatus: () => JSON.stringify({ ok: true, enrolled: false, enabled: false, permission: false }),
+  voiceEnrollStart: () => JSON.stringify({ ok: false, message: 'Voice check Android build mein hi available hai.' }),
+  voiceEnrollFinish: () => JSON.stringify({ ok: false, message: 'Voice check Android build mein hi available hai.' }),
+  voiceLockSet: () => JSON.stringify({ ok: false, message: 'Voice check Android build mein hi available hai.' }),
+  voiceClear: () => JSON.stringify({ ok: false, message: 'Voice check Android build mein hi available hai.' }),
+  voiceLastCheck: () => JSON.stringify({ ok: true, matched: true, score: -1 }),
   autoCall: () => JSON.stringify({ ok: false, needs_user_action: true, message: 'Auto-call Android par hi available hai.' }),
   // Direct PC link is Android-only. Never pretend a browser can pair/upload.
   pcLinkConnect: () => JSON.stringify({ ok: false, needs_user_action: true, message: 'PC link Android build mein hi available hai.' }),
@@ -200,6 +206,8 @@ const DEFAULTS = {
   autoCallEnabled: false,
   autoCallNumber: '',
   wakeRequired: true,
+  // Optional: only the enrolled voice may issue spoken commands.
+  voiceLock: false,
   onboarded: false,
   micSafetyVersion: 1
 };
@@ -1531,6 +1539,9 @@ function bgMode() {
 /* Explicit microphone mute. While true nothing may start the recognizer until
    the user taps the orb again. It applies to both JS and the native loop. */
 let micMuted = false;
+/** Set by Native.onVoiceVerified before each final STT result. */
+let voiceVerifiedOk = true;
+let voiceVerifiedScore = -1;
 
 function updateMicUI() {
   try {
@@ -1789,7 +1800,9 @@ function addBubble(role, roman, urdu, meta) {
   const main = document.createElement('div');
   main.textContent = String(roman == null ? '' : roman);
   bubble.appendChild(main);
-  if (urdu && String(urdu).trim()) {
+  // Tool results and local replies pass the same text twice. Printing both
+  // would show one answer as two identical chat bubbles, so skip the duplicate.
+  if (urdu && String(urdu).trim() && String(urdu).trim() !== String(roman == null ? '' : roman).trim()) {
     const u = document.createElement('span');
     u.className = 'urdu';
     u.textContent = String(urdu).trim();
@@ -1941,7 +1954,7 @@ function callTool(name, args) {
       Number.isFinite(h) && x >= 0 && y >= 0 && w > 0 && h > 0;
     try {
       if (hasBounds) return parseNativeResult(Native.overlayShow(x, y, w, h, label));
-      if (label) return parseNativeResult(Native.executeTool('overlay_highlight', { label }));
+      if (label) return parseNativeResult(Native.executeTool('overlay_highlight', JSON.stringify({ label })));
       return { ok: false, message: 'Highlight ke liye label ya screen bounds (x, y, w, h) do.' };
     } catch (e) { return { ok: false, message: 'Overlay fail: ' + e }; }
   }
@@ -1951,7 +1964,7 @@ function callTool(name, args) {
   }
   if (name === 'call_status') {
     let status;
-    try { status = parseNativeResult(Native.executeTool('call_status', {})); }
+    try { status = parseNativeResult(Native.executeTool('call_status', JSON.stringify({}))); }
     catch (e) { status = { ok: false, message: 'Call status fail: ' + e }; }
     try {
       status.number = Native.getAutoCallNumber();
@@ -2470,6 +2483,164 @@ function tryLocalOpen(low) {
   return true;
 }
 
+/* ------------------------------------------------- guided third-party flows */
+const nap = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+let pendingInstagramSend = null;
+
+function uiAutomationReady() {
+  try {
+    return !!(hasNative && Native.hasAutomation && Native.hasAutomation() &&
+      Native.uiClick && Native.uiType && Native.uiDump);
+  } catch (e) { return false; }
+}
+
+function uiDumpSegments(dump) {
+  return String(dump || '').split('|')
+    .map((s) => s.replace(/^\[(?:button|field|tap)\]\s*/i, '').trim())
+    .filter((s) => s.length > 7 &&
+      !/^(home|search|shorts|subscriptions|you|library|history|settings|notifications)$/i.test(s));
+}
+
+function videoCandidates(dump, query) {
+  const tokens = String(query || '').toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 3);
+  return uiDumpSegments(dump)
+    .filter((s) => {
+      const low = s.toLowerCase();
+      return /\d{1,2}:\d{2}/.test(s) || tokens.some((t) => low.includes(t));
+    })
+    .filter((s) => !/^(search results|autoplay|comments|subscribe|share|save)$/i.test(s))
+    .slice(0, 8);
+}
+
+/**
+ * Opens YouTube and tries the in-app search/result UI through accessibility.
+ * If a video cannot be proven to start, the reply says so instead of lying.
+ */
+async function youtubePlayFlow(rawQuery) {
+  const query = String(rawQuery || '').trim();
+  if (!query) return { ok: false, message: 'Kaun sa gana search karun, sir?' };
+
+  // Search first, while Jarvis is still the visible app. Android blocks a
+  // background activity start once YouTube has taken the screen, so calling
+  // open_app first used to make the search fail with "YouTube nahi khul saka".
+  const searched = callTool('youtube_search', { query });
+  const opened = searched.ok ? searched : callTool('open_app', { app_name: 'youtube' });
+  await nap(1400);
+  if (!uiAutomationReady()) {
+    return {
+      ok: !!(searched.ok || opened.ok),
+      needs_user_action: true,
+      message: searched.ok
+        ? "YouTube par '" + query + "' search khol diya. Phone automation off hai, isliye video aap khud chun sakte hain."
+        : (opened.ok
+          ? "YouTube khol diya, lekin search nahi chal paaya. '" + query + "' search karke video aap chun sakte hain."
+          : (searched.message || 'YouTube nahi khul paaya.'))
+    };
+  }
+
+  let searchClicked = false;
+  try {
+    searchClicked = !!(Native.uiClick('Search') || Native.uiClickId('search') ||
+      Native.uiClick('Search YouTube'));
+    if (searchClicked) {
+      Native.uiType(query);
+      await nap(500);
+      Native.uiClick('Search') || Native.uiClick('Go') || Native.uiClick('Enter');
+      await nap(1800);
+    }
+  } catch (e) { searchClicked = false; }
+  if (!searched.ok && !opened.ok) {
+    return { ok: false, message: searched.message || 'YouTube nahi khul paaya.' };
+  }
+
+  let dump = '';
+  try { dump = Native.uiDump() || ''; } catch (e) { }
+  const candidates = videoCandidates(dump, query);
+  for (const title of candidates) {
+    try {
+      if (!Native.uiClick(title)) continue;
+    } catch (e) { continue; }
+    await nap(1100);
+    let after = '';
+    try { after = Native.uiDump() || ''; } catch (e) { }
+    if (/\b(pause|now playing|playing)\b/i.test(after)) {
+      return { ok: true, message: "'" + title + "' chal raha hai, sir." };
+    }
+    return {
+      ok: true,
+      message: "'" + title + "' khol diya. Playback confirm karne ke liye screen dekh lijiye, sir."
+    };
+  }
+  return {
+    ok: true,
+    needs_user_action: true,
+    message: "YouTube par '" + query + "' search khul gaya, lekin video auto-select nahi ho paaya. Aap video chun sakte hain."
+  };
+}
+
+/** Instagram Direct: open the real app, find the contact, prepare text, gate Send. */
+async function instagramDmFlow(contact, message, confirmed) {
+  const who = String(contact || '').trim();
+  if (!who) return { ok: false, message: 'Kis ko message bhejna hai?' };
+  const opened = callTool('instagram_dm', { contact: who, message: '' });
+  if (!opened.ok) return opened;
+  if (!uiAutomationReady()) {
+    return { ok: true, needs_user_action: true, message: opened.message };
+  }
+
+  await nap(1500);
+  try {
+    Native.uiClick('Messages') || Native.uiClick('Direct') || Native.uiClick('Inbox') ||
+      Native.uiClick('New message') || Native.uiClick('Search');
+  } catch (e) { }
+  await nap(700);
+  try { Native.uiType(who); } catch (e) { }
+  await nap(800);
+  let clicked = false;
+  try {
+    clicked = !!(Native.uiClick(who) || Native.uiClick(who.split(/\s+/)[0]));
+  } catch (e) { }
+  if (!clicked) {
+    return {
+      ok: true,
+      needs_user_action: true,
+      message: 'Instagram messages khul gaye, lekin ' + who + ' chat nahi mila. Contact dhoondh kar message likh dijiye.'
+    };
+  }
+  await nap(700);
+  const text = String(message || '').trim();
+  if (!text) {
+    return { ok: true, needs_user_action: true, message: who + ' ka chat khul gaya. Message bataiye.' };
+  }
+  try { Native.uiType(text); } catch (e) { }
+  await nap(400);
+  if (!confirmed) {
+    pendingInstagramSend = { contact: who, message: text, at: Date.now() };
+    return {
+      ok: true,
+      needs_user_action: true,
+      message: who + ' ke liye message tayyar hai. Bhejna hai to "confirm bhejo" boliye.'
+    };
+  }
+  let sent = false;
+  try { sent = !!(Native.uiClick('Send') || Native.uiClick('send') || Native.uiClick('Bhejo')); } catch (e) { }
+  pendingInstagramSend = null;
+  return sent
+    ? { ok: true, message: who + ' ko message bhejne ke liye Send dabaya gaya.' }
+    : { ok: false, needs_user_action: true, message: 'Send button nahi mila. Message tayyar hai, aap dabaiye.' };
+}
+
+function songQueryFrom(text) {
+  let q = String(text || '').trim().replace(/^(?:hey\s+)?(?:jarvis|javis)\s*[,. ]*/i, '');
+  q = q.replace(/^(?:youtube|yt)\s*(?:pe|par|mein|main|se)?\s*/i, '');
+  q = q.replace(/^(?:kholo|khol kar|kholke|open|chalao)\s*/i, '');
+  q = q.replace(/^(?:aur|and)\s*/i, '');
+  q = q.replace(/^(?:gana|gaana|song|track|video)\s*/i, '');
+  q = q.replace(/\s*(?:gana|gaana|song|track)?\s*(?:search\s+karke|search\s+kar|search|karke|chalao|chala do|chala de|play\s+karo|play|bajao|sunao|do)\s*[.!?]*$/i, '');
+  q = q.replace(/^(?:search\s+karke|search|play|bajao|chalao)\s*/i, '');
+  return q.trim().replace(/[.!?]+$/, '');
+}
+
 async function localCommand(text) {
   const low = text.toLowerCase().trim();
   const lang = detectLang(low);
@@ -2490,6 +2661,84 @@ async function localCommand(text) {
   if (/^(?:dictation)\s+(?:status|haal)\b/.test(low)) {
     const msg = dictationStatusLine();
     respond(msg, msg);
+    return true;
+  }
+
+  // Natural conversation opener. "Hello Jarvis, kaise ho" must be answered
+  // locally and instantly ("Kya hua sir") on both voice and typed input, with
+  // or without an API key. Wake words and polite fillers are optional here.
+  if (/^(?:(?:hey|hi|hello|hallo|salam|assalam(?:\s+o\s+alaikum)?|aoa)\b[\s,.]*)?(?:(?:jarvis|javis|sir)\b[\s,.]*)?(?:kaise\s+ho|kese\s+ho|kaisay\s+ho|kaise\s+hain|how\s+are\s+you|how\s+r\s+u|kya\s+haal(?:\s+hai)?|kia\s+haal(?:\s+hai)?)\b/.test(low)) {
+    const msg = 'Kya hua sir? Main bilkul theek hoon, aap bataiye.';
+    respond(msg, msg);
+    return true;
+  }
+  if (/^(?:(?:hey|hi|hello|hallo)\b[\s,.]*)?(?:jarvis|javis)\b[\s,.!?]*$/.test(low)) {
+    const msg = 'Ji sir, hukam kijiye.';
+    respond(msg, msg);
+    return true;
+  }
+
+  // Explicit confirmation for a prepared Instagram message. Never auto-sends
+  // on a bare "yes" (that belongs to the PC save flow).
+  if (/^(?:confirm\s+(?:bhejo|bhej\s*do|send|message)|bhej\s*do(?:\s+hi)?|send\s+it)$/.test(low)) {
+    const pending = pendingInstagramSend;
+    if (!pending || Date.now() - pending.at > 120000) {
+      pendingInstagramSend = null;
+      const msg = 'Koi pending Instagram message nahi hai. Pehle contact aur message bataiye.';
+      respond(msg, msg);
+      return true;
+    }
+    const r = await instagramDmFlow(pending.contact, pending.message, true);
+    toolLog('instagram confirm', r);
+    respond(String(r.message || 'Send nahi hua.'), String(r.message || 'Send nahi hua.'));
+    return true;
+  }
+
+  // "Insta kholo, messages mein My Best Friend ko '...' bhejo" uses the real
+  // Instagram app. Without a login/UI match it reports honestly, never fakes.
+  if (/\b(?:insta(?:gram)?|dm)\b/.test(low) &&
+      /\b(?:message|messages|bhejo|bhej do|send|dm)\b/.test(low) &&
+      !/^\s*(?:insta(?:gram)?|dm)\s+(?:kholo|open)\s*[.!?]*$/.test(low)) {
+    const raw = String(text || '');
+    let contact = '';
+    let message = '';
+    // A quoted portion is the message text, never the recipient.
+    const quoted = raw.match(/["'“‘]([^"'”’]{1,160})["'”’]/);
+    if (quoted) message = quoted[1].trim();
+    const rest = quoted ? raw.replace(quoted[0], ' ') : raw;
+    // "<contact> ko <message> bhejo" / "send <message> to <contact>".
+    const koForm = rest.match(/\b([a-z][a-z0-9 _'-]{1,60}?)\s+ko\s+(.+?)\s*(?:bhej do|bhejo|send(?:\s+kar(?:o|de)?)?|message(?:\s+kar(?:o|de)?)?|dm(?:\s+kar(?:o|de)?)?)\s*[.!?]*$/i);
+    if (koForm) {
+      // Drop leading app/navigation words: "insta kholo messages mein X ko Y bhejo".
+      let who = koForm[1].trim().replace(/^.*?\b(?:messages?|dm|insta(?:gram)?)\b[\s,.]*(?:(?:mein|main|in)\s*)?/i, '').trim();
+      contact = who || koForm[1].trim();
+      message = message || koForm[2].trim();
+    }
+    const toForm = rest.match(/\b(?:bhejo|send)\s+(.+?)\s+(?:to|ko)\s+([a-z][a-z0-9 _'-]{1,60})\s*[.!?]*$/i);
+    if (toForm) { message = message || toForm[1].trim(); contact = contact || toForm[2].trim(); }
+    const mm = rest.match(/(?:message|text|likho|bolo|keh kar|ke kar)\s+([a-z0-9 _'-]{1,160}?)\s*(?:bhejo|bhej do|send|dm)?\s*[.!?]*$/i);
+    if (mm) message = message || mm[1].trim();
+    if (!contact) contact = 'My Best Friend';
+    const r = await instagramDmFlow(contact, message, false);
+    toolLog('instagram dm', r);
+    respond(String(r.message || 'Instagram message nahi ho paaya.'), String(r.message || 'Instagram message nahi ho paaya.'));
+    return true;
+  }
+
+  // YouTube: open the app, drive search through accessibility when available,
+  // then try to start the first matching video. No fake "playing" claim.
+  if (/\b(?:youtube|yt|gana|gaana|song|track)\b/.test(low) &&
+      /\b(?:chalao|chala do|chala de|play|bajao|sunao|search|khol)\b/.test(low) &&
+      !/\b(?:channel|subscribe|kholo\b(?!\s+aur))/.test(low)) {
+    const query = songQueryFrom(text);
+    if (!query) {
+      const msg = 'Kaun sa gana search karun, sir? Jaise "youtube pe Tum Hi Ho gana chalao".';
+      respond(msg, msg);
+      return true;
+    }
+    const r = await youtubePlayFlow(query);
+    toolLog('youtube play', r);
+    respond(String(r.message || 'YouTube Play nahi hua.'), String(r.message || 'YouTube Play nahi hua.'));
     return true;
   }
 
@@ -3772,7 +4021,7 @@ async function mcpInitialize(name) {
   return mcpRpc(name, 'initialize', {
     protocolVersion: '2024-11-05',
     capabilities: {},
-    clientInfo: { name: 'jarvis-mobile', version: '2.3.3' }
+    clientInfo: { name: 'jarvis-mobile', version: '2.3.4' }
   });
 }
 async function mcpListTools(name) {
@@ -4448,6 +4697,27 @@ function toolDeclarations() {
       }
     },
     {
+      name: 'youtube_play',
+      description: 'Search a song on YouTube and try to start the first matching video through phone accessibility. Reports honestly if autoplay cannot be confirmed.',
+      parameters: {
+        type: 'OBJECT',
+        properties: { query: { type: 'STRING', description: 'Song or video to play' } },
+        required: ['query']
+      }
+    },
+    {
+      name: 'instagram_dm',
+      description: 'Open Instagram Direct for a named contact. Message text can be prepared but the final Send tap stays with the user.',
+      parameters: {
+        type: 'OBJECT',
+        properties: {
+          contact: { type: 'STRING', description: 'Contact name, e.g. My Best Friend' },
+          message: { type: 'STRING', description: 'Optional message text to prepare' }
+        },
+        required: ['contact']
+      }
+    },
+    {
       name: 'youtube_channel',
       description: 'Open a YouTube channel page. Subscribing cannot be automated; the user must tap Subscribe.',
       parameters: {
@@ -5082,7 +5352,7 @@ function buildSystemPrompt(userText, fast) {
     'THINK FIRST: the user speaks English and Roman Urdu and speech recognition makes mistakes ("jaadui", "travis" = Jarvis; wrong app/song names). Infer the real intent. Resolve "isko", "woh", "yahan" from the conversation and from ui_dump.',
     'ACT, DO NOT LECTURE: use tools immediately and chain them until the WHOLE request is done. Never tell the user to do the remaining steps themselves. If a tool fails, try another way, then report the real reason in one short sentence.',
     'HONESTY: say a task is done only when a tool returned ok:true. If needs_user_action:true, say what to tap. Never invent emails, messages, alarms, installs or subscriptions. YouTube subscribe and Gmail mark-as-read cannot be automated.',
-    'PHONE POWERS: open apps; Play Store search and REAL install (install_app taps Install and Open when Phone automation is on); read screen (ui_dump); tap (ui_click); type (ui_type); Back/Home/Recents/Notifications (system_action); YouTube search; WhatsApp/SMS/email drafts; alarms; timers; maps; volume; torch; battery/network; clipboard; memory.',
+    'PHONE POWERS: open apps; Play Store search and REAL install (install_app taps Install and Open when Phone automation is on); read screen (ui_dump); tap (ui_click); type (ui_type); Back/Home/Recents/Notifications (system_action); YouTube search and accessibility-guided song play (youtube_play); Instagram Direct open/contact lookup with a gated Send (instagram_dm); WhatsApp/SMS/email drafts; alarms; timers; maps; volume; torch; battery/network; clipboard; memory.',
     'SMART HOME: smart_home controls lights, fans, AC, TV, doors, blinds, coffee and plugs. A virtual home works with no setup; Home Assistant is optional. For "light on karo", "AC 22 degree", "TV band", "darwaza lock", "parda kholo" call smart_home. smart_scene applies morning/movie/sleep/guest/work/away/party for "movie mode" or "good night". Use smart_home_help if unsure.',
     'NEWS: news_brief reads live Google News headlines with no API key. Use it for "news sunao" or "latest news about cricket". Read only what it returned; never invent headlines.',
     'INSTALL: for "X install karo" call install_app ONCE with the exact app name, not open_play_store too. Wait for the result and report exactly what happened.',
@@ -5166,6 +5436,10 @@ function geminiRequest(model, payload, timeoutMs) {
 }
 
 async function runTool(name, args) {
+  if (name === 'youtube_play') return youtubePlayFlow(args && args.query);
+  if (name === 'instagram_dm') {
+    return instagramDmFlow(args && args.contact, args && args.message, !!(args && args.confirmed));
+  }
   if (name === 'pc_link') return pcLinkTool(args || {});
   if (name === 'auto_call') return callTool(name, args || {});
   if (name === 'overlay_highlight') return callTool(name, args || {});
@@ -5572,6 +5846,17 @@ function renderSettings() {
   if (hands) hands.checked = !!settings.handsFree;
   const wake = $('#wakeToggle');
   if (wake) wake.checked = !!settings.wakeRequired;
+  const voiceLockToggle = $('#voiceLockToggle');
+  if (voiceLockToggle) voiceLockToggle.checked = !!settings.voiceLock;
+  const voiceLockState = $('#voiceLockState');
+  if (voiceLockState) {
+    let vs = { ok: false, enrolled: false, enabled: false, score: -1 };
+    try { vs = parseNativeResult(Native.voiceEnrollStatus()); } catch (e) { }
+    voiceLockState.textContent = vs.enrolled
+      ? ('Enrolled · lock ' + (settings.voiceLock ? 'on' : 'off') +
+         (Number(vs.score) >= 0 ? ' · match ' + Number(vs.score).toFixed(2) : ''))
+      : 'Voice lock off · pehle awaaz enroll karein.';
+  }
   const bg = $('#alwaysOnToggle');
   if (bg) bg.checked = settings.alwaysOn !== false;
   const bgState = $('#bgState');
@@ -5649,7 +5934,7 @@ function renderSettings() {
 
   const about = $('#aboutText');
   if (about) {
-    let v = '2.3.3';
+    let v = '2.3.4';
     let d = 'Android';
     try { v = Native.version(); d = Native.deviceSummary(); } catch (e) { }
     about.textContent = 'Jarvis Mobile ' + v + ' · ' + d
@@ -5697,6 +5982,78 @@ function hideKeySetup() {
   if (el) el.classList.add('hidden');
 }
 
+/* Optional one-person voice check. Every step is honest and skippable. */
+let voiceEnrollRecording = false;
+
+function renderVoiceSetup() {
+  const hint = $('#voiceEnrollHint');
+  const btn = $('#voiceEnrollBtn');
+  let status = { ok: false, enrolled: false, enabled: false, permission: false };
+  try { status = parseNativeResult(Native.voiceEnrollStatus()); } catch (e) { }
+  if (btn) btn.textContent = voiceEnrollRecording ? 'RECORD BAND KAREIN' : 'AWAZ RECORD KAREIN';
+  if (hint) {
+    hint.textContent = status.enrolled
+      ? (status.enabled ? 'Awaaz save ho gayi · voice lock on.' : 'Awaaz save ho gayi.')
+      : (status.permission ? 'Abhi enroll nahi kiya.' : 'Pehle mic permission allow karein.');
+  }
+}
+
+function showVoiceSetup() {
+  closeSheets();
+  hideKeySetup();
+  voiceEnrollRecording = false;
+  const el = $('#voiceSetup');
+  if (el) el.classList.remove('hidden');
+  let st = { ok: false, permission: false };
+  try { st = parseNativeResult(Native.voiceEnrollStatus()); } catch (e) { }
+  if (!st.permission) { try { Native.requestMicPermission(); } catch (e) { } }
+  renderVoiceSetup();
+}
+
+function hideVoiceSetup() {
+  voiceEnrollRecording = false;
+  const el = $('#voiceSetup');
+  if (el) el.classList.add('hidden');
+}
+
+async function voiceEnrollToggle() {
+  const btn = $('#voiceEnrollBtn');
+  if (!voiceEnrollRecording) {
+    let r;
+    try { r = parseNativeResult(Native.voiceEnrollStart()); }
+    catch (e) { r = { ok: false, message: 'Mic start nahi hua.' }; }
+    if (!r.ok) { toast(r.message || 'Mic start nahi hua.'); renderVoiceSetup(); return; }
+    voiceEnrollRecording = true;
+    if (btn) btn.textContent = 'RECORD BAND KAREIN';
+    const hint = $('#voiceEnrollHint');
+    if (hint) hint.textContent = 'Sun raha hoon — “Hello Jarvis, ye meri awaaz hai” bolein.';
+    return;
+  }
+  voiceEnrollRecording = false;
+  let r;
+  try { r = parseNativeResult(Native.voiceEnrollFinish()); }
+  catch (e) { r = { ok: false, message: 'Awaaz save nahi hui.' }; }
+  toast(r.message || '');
+  renderVoiceSetup();
+}
+
+function finishVoiceSetup() {
+  hideVoiceSetup();
+  let status = { ok: false, enrolled: false };
+  try { status = parseNativeResult(Native.voiceEnrollStatus()); } catch (e) { }
+  settings.voiceLock = !!(status.ok && status.enrolled);
+  if (settings.voiceLock) {
+    try { Native.voiceLockSet(true); } catch (e) { }
+  }
+  saveSettings();
+  renderSettings();
+  try { Native.warmVoice(); } catch (e) { }
+  setTimeout(() => {
+    respond(LINES.welcome.roman, LINES.welcome.urdu);
+    if (settings.handsFree && state === 'idle') scheduleListen(700);
+  }, 320);
+}
+
 function saveSetupKey() {
   const input = $('#setupKeyInput');
   const key = input ? input.value.trim() : '';
@@ -5715,11 +6072,7 @@ function saveSetupKey() {
   renderSettings();
   updateConnState();
   try { Native.requestMicPermission(); } catch (e) { }
-  try { Native.warmVoice(); } catch (e) { }
-  setTimeout(() => {
-    respond(LINES.welcome.roman, LINES.welcome.urdu);
-    if (settings.handsFree && state === 'idle') scheduleListen(700);
-  }, 320);
+  showVoiceSetup();
 }
 
 function openSheet(id) {
@@ -6151,6 +6504,11 @@ window.jarvisNative = {
   onSpeechPartial(text) {
     if (!micMuted && state === 'listening') transcript(text);
   },
+  onVoiceVerified(ok, score) {
+    voiceVerifiedOk = ok !== false;
+    voiceVerifiedScore = Number(score);
+    if (!Number.isFinite(voiceVerifiedScore)) voiceVerifiedScore = -1;
+  },
   onSpeechFinal(text, alternativesJson) {
     if (micMuted) {
       try { Native.cancelListening(); } catch (e) { }
@@ -6216,6 +6574,15 @@ window.jarvisNative = {
     // or AppIntents. Wake-word gating above is deliberately unchanged.
     if (pcCallActive) {
       pcHandleIntercom(command);
+      return;
+    }
+    // Optional voice lock: reject an utterance that does not match the
+    // enrolled voice. Never blocks typed commands or the onboarding itself.
+    if (settings.voiceLock && !voiceVerifiedOk) {
+      voiceVerifiedOk = true;
+      const msg = 'Sir, ye aapki awaaz nahi lagti. Voice lock on hai.';
+      respond(msg, msg);
+      if (bgMode()) pushToTalk = false;
       return;
     }
     handleCommand(command);
@@ -6574,6 +6941,41 @@ function bindEvents() {
     saveSettings();
     toast(settings.wakeRequired ? 'Wake word zaroori hai.' : 'Bina wake word bhi sunega.');
   });
+  $('#voiceLockToggle').addEventListener('change', e => {
+    let r;
+    try { r = parseNativeResult(Native.voiceLockSet(!!e.target.checked)); }
+    catch (x) { r = { ok: false, message: 'Voice lock set nahi hua.' }; }
+    if (!r.ok) {
+      e.target.checked = false;
+      toast(r.message || 'Pehle awaaz enroll karein.');
+      return;
+    }
+    settings.voiceLock = !!e.target.checked;
+    saveSettings();
+    renderSettings();
+    toast(settings.voiceLock ? 'Voice lock on.' : 'Voice lock off.');
+  });
+  $('#voiceLockEnroll').addEventListener('click', () => {
+    let r;
+    try { r = parseNativeResult(Native.voiceEnrollStart()); }
+    catch (x) { r = { ok: false, message: 'Mic start nahi hua.' }; }
+    if (!r.ok) { toast(r.message || 'Mic start nahi hua.'); return; }
+    toast('“Hello Jarvis, ye meri awaaz hai” bolein.');
+    setTimeout(() => {
+      let f;
+      try { f = parseNativeResult(Native.voiceEnrollFinish()); }
+      catch (x) { f = { ok: false, message: 'Awaaz save nahi hui.' }; }
+      toast(f.message || '');
+      renderSettings();
+    }, 3000);
+  });
+  $('#voiceLockClear').addEventListener('click', () => {
+    try { Native.voiceClear(); } catch (e) { }
+    settings.voiceLock = false;
+    saveSettings();
+    renderSettings();
+    toast('Awaaz data hata diya.');
+  });
 
   $('#saveKey').addEventListener('click', () => {
     const input = $('#apiKeyInput');
@@ -6601,9 +7003,11 @@ function bindEvents() {
   });
   $('#setupKeyLater').addEventListener('click', () => {
     hideKeySetup();
-    openSheet('sheet');
+    showVoiceSetup();
     toast('Settings mein API key daal sakte hain.');
   });
+  $('#voiceEnrollBtn').addEventListener('click', voiceEnrollToggle);
+  $('#voiceSetupDone').addEventListener('click', finishVoiceSetup);
 
   $('#removeKey').addEventListener('click', () => {
     try { Native.clearApiKey(); } catch (e) { }

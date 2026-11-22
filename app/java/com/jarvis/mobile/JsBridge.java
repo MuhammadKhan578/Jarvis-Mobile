@@ -70,6 +70,12 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
     private volatile int speechSeq = 0;
     /** User pressed the in-app mic button to turn the microphone off. */
     private volatile boolean micMuted = false;
+    /** Optional on-device speaker check; never enabled without the user's consent. */
+    private final VoicePrint voicePrint;
+    private volatile VoiceCapture voiceCapture;
+    private volatile VoiceCapture speechCapture;
+    private volatile boolean lastVoiceOk = true;
+    private volatile float lastVoiceScore = -1f;
 
     public JsBridge(Activity activity, WebView web, TtsEngine tts, SpeechEngine speech) {
         this.activity = activity;
@@ -78,6 +84,7 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
         this.speech = speech;
         this.prefs = activity.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         this.media = new MediaTools(activity, js -> callJs(js));
+        this.voicePrint = new VoicePrint(activity);
         this.tts.setListener(this);
         this.neural = new NeuralTts(activity);
         this.neural.setListener(this);
@@ -613,6 +620,20 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
 
     @Override
     public void onSpeechFinal(String text, java.util.ArrayList<String> alternatives) {
+        boolean voiceOk = true;
+        float score = -1f;
+        if (voicePrint.isEnabled()) {
+            VoiceCapture cap = speechCapture;
+            speechCapture = null;
+            short[] pcm = (cap == null) ? null : cap.stop();
+            if (cap != null) cap.release();
+            voiceOk = voicePrint.verify(pcm);
+            score = voicePrint.lastScore();
+        }
+        lastVoiceOk = voiceOk;
+        lastVoiceScore = score;
+        callJs("window.jarvisNative&&jarvisNative.onVoiceVerified(" + voiceOk + ","
+                + String.format(Locale.US, "%.3f", score) + ")");
         JSONArray arr = new JSONArray();
         if (alternatives != null) {
             for (String s : alternatives) arr.put(s == null ? "" : s);
@@ -622,12 +643,20 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
 
     @Override
     public void onSpeechError(int code, String message) {
+        stopSpeechCapture();
         callJs("window.jarvisNative&&jarvisNative.onSpeechError(" + code + "," + q(message) + ")");
     }
 
     @Override
     public void onSpeechEnd() {
+        stopSpeechCapture();
         callJs("window.jarvisNative&&jarvisNative.onSpeechEnd()");
+    }
+
+    private void stopSpeechCapture() {
+        VoiceCapture cap = speechCapture;
+        speechCapture = null;
+        if (cap != null) { cap.stop(); cap.release(); }
     }
 
     @Override
@@ -651,6 +680,12 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
         }
         // A manual start always wins over the "thinking/speaking" hold.
         try { speech.setHeld(false); } catch (Exception ignored) { }
+        stopSpeechCapture();
+        if (voicePrint.isEnabled()) {
+            VoiceCapture cap = new VoiceCapture();
+            if (cap.start()) speechCapture = cap;
+            else cap.release(); // fail closed below: no audio means no verification
+        }
         speech.start();
         return "ok";
     }
@@ -1086,6 +1121,77 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
         return pcAccepted();
     }
 
+    // --------------------------------------------------- optional voice check
+
+    private boolean hasMic() {
+        return activity.checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+                == PackageManager.PERMISSION_GRANTED;
+    }
+
+    @JavascriptInterface
+    public String voiceEnrollStatus() {
+        try {
+            JSONObject o = new JSONObject();
+            o.put("ok", true);
+            o.put("enrolled", voicePrint.hasEnrollment());
+            o.put("enabled", voicePrint.isEnabled());
+            o.put("score", voicePrint.lastScore());
+            o.put("permission", hasMic());
+            return o.toString();
+        } catch (Exception e) { return "{\"ok\":false,\"message\":\"" + e.getMessage() + "\"}"; }
+    }
+
+    @JavascriptInterface
+    public String voiceEnrollStart() {
+        if (!hasMic()) return "{\"ok\":false,\"message\":\"Mic permission nahi hai.\"}";
+        VoiceCapture old = voiceCapture;
+        if (old != null) { old.stop(); old.release(); }
+        VoiceCapture c = new VoiceCapture();
+        if (!c.start()) return "{\"ok\":false,\"message\":\"Mic start nahi hua.\"}";
+        voiceCapture = c;
+        return "{\"ok\":true,\"message\":\"Ab 'Hello Jarvis, ye meri awaaz hai' bolein.\"}";
+    }
+
+    @JavascriptInterface
+    public String voiceEnrollFinish() {
+        VoiceCapture c = voiceCapture;
+        voiceCapture = null;
+        if (c == null) return "{\"ok\":false,\"message\":\"Pehle recording start karein.\"}";
+        short[] pcm = c.stop();
+        c.release();
+        boolean ok = voicePrint.enroll(pcm);
+        JSONObject o = new JSONObject();
+        try {
+            o.put("ok", ok);
+            o.put("enrolled", voicePrint.hasEnrollment());
+            o.put("samples", pcm == null ? 0 : pcm.length);
+            o.put("message", ok ? "Aapki awaaz phone par save ho gayi."
+                    : "Awaaz clear nahi mili, dobara try karein.");
+        } catch (Exception e) { }
+        return o.toString();
+    }
+
+    @JavascriptInterface
+    public String voiceLockSet(boolean enabled) {
+        if (enabled && !voicePrint.hasEnrollment()) {
+            return "{\"ok\":false,\"message\":\"Pehle awaaz enroll karein.\"}";
+        }
+        voicePrint.setEnabled(enabled);
+        return "{\"ok\":true,\"enabled\":" + voicePrint.isEnabled() + "}";
+    }
+
+    @JavascriptInterface
+    public String voiceClear() {
+        voicePrint.clear();
+        return "{\"ok\":true,\"message\":\"Awaaz data hata diya.\"}";
+    }
+
+    @JavascriptInterface
+    public String voiceLastCheck() {
+        return "{\"ok\":true,\"matched\":" + lastVoiceOk + ",\"score\":"
+                + String.format(Locale.US, "%.3f", lastVoiceScore) + "}";
+    }
+
     // --------------------------------------------------------------- tools
 
     @JavascriptInterface
@@ -1107,7 +1213,7 @@ public class JsBridge implements TtsEngine.Listener, SpeechEngine.Listener, Neur
 
     @JavascriptInterface
     public String version() {
-        return "2.3.3";
+        return "2.3.4";
     }
 
     @JavascriptInterface

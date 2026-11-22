@@ -96,6 +96,7 @@ public final class AppIntents {
                 case "open_url": return openUrl(context, args.optString("url", ""));
                 case "youtube_search": return youtubeSearch(context, args.optString("query", ""));
                 case "youtube_channel": return youtubeChannel(context, args.optString("channel_name", ""));
+                case "instagram_dm": return instagramDm(context, args.optString("contact", ""), args.optString("message", ""));
                 case "send_whatsapp": return whatsapp(context, args.optString("phone", ""), args.optString("message", ""));
                 case "send_sms": return sms(context, args.optString("phone", ""), args.optString("message", ""));
                 case "call_number": return dial(context, args.optString("phone", ""));
@@ -358,6 +359,38 @@ public final class AppIntents {
                 ok ? "YouTube par '" + q + "' channel khol diya. Subscribe button aap ko khud dabana hoga."
                         : "YouTube channel nahi khul saka.",
                 true, null);
+    }
+
+    /**
+     * Opens Instagram Direct (or a prepared share sheet). A recipient cannot be
+     * selected or a message sent through a public Android intent, so this is
+     * deliberately honest: the final tap always stays with the user.
+     */
+    private static String instagramDm(Context c, String contact, String message) {
+        String who = contact == null ? "" : contact.trim();
+        // Callers may pass the whole spoken command. Keep only the name that
+        // follows "messages mein"/"insta ... ko" instead of echoing everything.
+        String cleaned = who.replaceAll("(?i)^.*?\\b(?:messages?|dm|insta(?:gram)?)\\b[\\s,.]*(?:(?:mein|main|in)\\s*)?", "").trim();
+        if (!cleaned.isEmpty()) who = cleaned;
+        String text = message == null ? "" : message.trim();
+        String url = "https://www.instagram.com/direct/inbox/";
+        Intent inbox = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+        inbox.setPackage("com.instagram.android");
+        boolean ok = start(c, inbox);
+        if (!ok) ok = start(c, new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+        if (ok && !text.isEmpty()) {
+            // A share intent can prefill text but NOT pick "My Best Friend".
+            Intent share = new Intent(Intent.ACTION_SEND);
+            share.setType("text/plain");
+            share.putExtra(Intent.EXTRA_TEXT, text);
+            share.setPackage("com.instagram.android");
+            start(c, share);
+        }
+        String whoText = who.isEmpty() ? "" : " " + who + " ko";
+        String msg = ok
+                ? "Instagram messages khol diya" + whoText + ". Text tayyar ho to Send aap khud dabaiye."
+                : "Instagram messages nahi khul paaya. Instagram install karke dobara try karein.";
+        return res(ok, msg, true, null);
     }
 
     private static String whatsapp(Context c, String phone, String message) {

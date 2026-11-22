@@ -204,6 +204,21 @@
     <div class="set-group">
       <div class="row">
         <div>
+          <b>Sirf meri awaaz (voice lock)</b>
+          <p class="hint" id="voiceLockState">Voice lock off.</p>
+        </div>
+        <label class="switch">
+          <input id="voiceLockToggle" type="checkbox">
+          <span></span>
+        </label>
+      </div>
+      <button id="voiceLockEnroll" class="mini-btn">Awaaz enroll karein</button>
+      <button id="voiceLockClear" class="mini-btn">Awaaz data hataein</button>
+    </div>
+
+    <div class="set-group">
+      <div class="row">
+        <div>
           <b>Gmail inbox (notifications)</b>
           <p class="hint" id="notifState">Permission nahi hai.</p>
         </div>
@@ -267,7 +282,7 @@
 
     <div class="set-group about">
       <div class="set-title">ABOUT</div>
-      <p class="hint" id="aboutText">Jarvis Mobile 2.3.3</p>
+      <p class="hint" id="aboutText">Jarvis Mobile 2.3.4</p>
       <p class="hint">Android 14–17 · background always-on · Gemini cloud brain · neural voice.</p>
     </div>
   </div>
@@ -535,6 +550,26 @@
     <div class="hint" id="setupKeyStatus">Key set nahi hai.</div>
     <button id="setupKeyLater" class="link setup-skip">Baad mein (Settings se add karunga)</button>
     <p class="hint center">Aap ki key kahin upload nahi hoti.</p>
+  </div>
+</div>
+
+<!-- ==================== FIRST-RUN OPTIONAL VOICE CHECK ==================== -->
+<div id="voiceSetup" class="onboard key-setup hidden">
+  <div class="onboard-card">
+    <div class="onboard-logo"><i></i></div>
+    <h2>SIRF AAPKI AWAZ</h2>
+    <p class="onboard-sub">Optional · sirf aapki awaaz se control</p>
+
+    <div class="onboard-points">
+      <div><b>1</b><span>“Hello Jarvis, ye meri awaaz hai” bolein aur record dabaiye.</span></div>
+      <div><b>2</b><span>Dubara bolein — awaaz ka model phone par hi save hota hai.</span></div>
+      <div><b>3</b><span>Ye biometric guarantee nahi hai. Aap isse skip kar sakte hain.</span></div>
+    </div>
+
+    <button id="voiceEnrollBtn" class="start-btn">AWAZ RECORD KAREIN</button>
+    <div class="hint center" id="voiceEnrollHint">Abhi enroll nahi kiya.</div>
+    <button id="voiceSetupDone" class="link setup-skip">Skip karein / Aage badhein</button>
+    <p class="hint center">Koi audio upload nahi hota.</p>
   </div>
 </div>
 

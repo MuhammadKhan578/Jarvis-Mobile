@@ -11,6 +11,7 @@ $pcDocs = Join-Path $root 'docs\PC_LINK.md'
 $deviceLink = Join-Path $app 'java\com\jarvis\mobile\DeviceLink.java'
 $neural = Join-Path $app 'java\com\jarvis\mobile\NeuralTts.java'
 $ttsEngine = Join-Path $app 'java\com\jarvis\mobile\TtsEngine.java'
+$speechEngine = Join-Path $app 'java\com\jarvis\mobile\SpeechEngine.java'
 $mainActivity = Join-Path $app 'java\com\jarvis\mobile\MainActivity.java'
 $html = Join-Path $app 'assets\www\index.html'
 $build = Join-Path $root 'build_apk.ps1'
@@ -39,12 +40,13 @@ $pcDocsText = if (Test-Path $pcDocs) { Get-Content $pcDocs -Raw } else { '' }
 $deviceText = if (Test-Path $deviceLink) { Get-Content $deviceLink -Raw } else { '' }
 $neuralText = if (Test-Path $neural) { Get-Content $neural -Raw } else { '' }
 $ttsText = if (Test-Path $ttsEngine) { Get-Content $ttsEngine -Raw } else { '' }
+$speechText = if (Test-Path $speechEngine) { Get-Content $speechEngine -Raw } else { '' }
 $mainText = if (Test-Path $mainActivity) { Get-Content $mainActivity -Raw } else { '' }
 $htmlText = if (Test-Path $html) { Get-Content $html -Raw } else { '' }
 
-Check 'app.js version' ($jsText -match "2\.3\.3")
-Check 'manifest version' ($manifestText -match 'versionCode="17"' -and $manifestText -match 'versionName="2\.3\.3"')
-Check 'build script version' ($buildText -match '"2\.3\.3"' -and $buildText -match '\$VersionCode = 17')
+Check 'app.js version' ($jsText -match "2\.3\.4")
+Check 'manifest version' ($manifestText -match 'versionCode="18"' -and $manifestText -match 'versionName="2\.3\.4"')
+Check 'build script version' ($buildText -match '"2\.3\.4"' -and $buildText -match '\$VersionCode = 18')
 Check 'release APK not debuggable in manifest' ($manifestText -notmatch 'android:debuggable="true"')
 
 # --- Cross-file contract checks: JS calls vs Java bridge and HTML IDs -------
@@ -214,6 +216,61 @@ Check 'docs state real calls need PC Twilio line' ($pcDocsText -match 'Twilio')
 Check 'docs include any-file examples' ($pcDocsText -match 'zip' -and $pcDocsText -match 'video')
 Check 'docs give save examples' ($pcDocsText -match 'Downloads mein save karo' -and $pcDocsText -match 'D:\\backup\\file.zip')
 Check 'docs give intercom stop words' ($pcDocsText -match 'band karo' -and $pcDocsText -match 'goodbye')
+
+# --- Chat bubble must not print the same reply twice -------------------------
+Check 'duplicate roman/urdu bubble suppressed' ($jsText -match 'String\(urdu\)\.trim\(\) !== String\(roman')
+
+# --- Guided Instagram DM / YouTube play flows (honest, gated) ---------------
+Check 'youtube_play tool declared' ($jsText -match "name: 'youtube_play'")
+Check 'instagram_dm tool declared' ($jsText -match "name: 'instagram_dm'")
+Check 'youtube_play routed in JS' ($jsText -match "name === 'youtube_play'.*youtubePlayFlow")
+Check 'instagram_dm routed in JS' ($jsText -match "name === 'instagram_dm'" -and $jsText -match 'instagramDmFlow\(args && args\.contact')
+Check 'youtube search runs before app handoff' ($jsText -match "const searched = callTool\('youtube_search'" -and $jsText -match 'const opened = searched\.ok')
+Check 'youtube failure reports background-start honest fallback' ($jsText -match 'search nahi chal paaya')
+Check 'native instagram strips spoken boilerplate from contact' ($intentsText -match 'messages\?\|dm\|insta')
+Check 'youtube play checks real UI dump' ($jsText -match 'Native\.uiDump\(\)')
+Check 'youtube play only claims playing on pause/playing state' ($jsText -match '/\\b\(pause\|now playing\|playing\)\\b/i')
+Check 'instagram parses contact ko message bhejo' ($jsText -match 'koForm')
+Check 'quoted text is the message, not the recipient' ($jsText -match 'A quoted portion is the message text')
+Check 'instagram send needs explicit confirm' ($jsText -match 'confirm\\s\+\(?:bhejo|bhej')
+Check 'bare yes does not send instagram message' ($jsText -match 'bare \"yes\" \(that belongs to the PC save flow\)')
+Check 'instagram_dm native case exists' ($intentsText -match 'case "instagram_dm"')
+Check 'instagram_dm native method exists' ($intentsText -match 'private static String instagramDm\(')
+Check 'instagram_dm opens real Direct inbox' ($intentsText -match 'instagram\.com/direct/inbox/')
+Check 'instagram_dm never claims delivered' ($intentsText -match 'Send aap khud dabaiye')
+
+# --- Optional on-device voice lock (skippable, private, no cloud) -----------
+$voicePrint = Join-Path $app 'java\com\jarvis\mobile\VoicePrint.java'
+$voiceCapture = Join-Path $app 'java\com\jarvis\mobile\VoiceCapture.java'
+Check 'VoicePrint.java exists' (Test-Path $voicePrint)
+Check 'VoiceCapture.java exists' (Test-Path $voiceCapture)
+foreach ($m in @('voiceEnrollStatus', 'voiceEnrollStart', 'voiceEnrollFinish',
+    'voiceLockSet', 'voiceClear', 'voiceLastCheck')) {
+  Check "bridge $m is @JavascriptInterface" ($bridgeText -match "@JavascriptInterface\s+public String $m\(")
+}
+foreach ($id in @('voiceSetup', 'voiceEnrollBtn', 'voiceEnrollHint', 'voiceSetupDone',
+    'voiceLockToggle', 'voiceLockState', 'voiceLockEnroll', 'voiceLockClear')) {
+  Check "voice setup element #$id" ($htmlText -match "id=`"$id`"")
+}
+Check 'voice setup is after key setup in markup' ($htmlText.IndexOf('id="voiceSetup"') -gt $htmlText.IndexOf('id="keySetup"'))
+Check 'voice setup can be skipped' ($htmlText -match 'voiceSetupDone' -and $htmlText -match 'Skip karein / Aage badhein')
+Check 'voice lock rejects unmatched spoken command' ($jsText -match 'settings\.voiceLock && !voiceVerifiedOk')
+Check 'native voice verified callback is consumed' ($jsText -match 'onVoiceVerified\(ok, score\)')
+Check 'voice setup stores nothing in cloud' ((Get-Content $voicePrint -Raw) -notmatch 'https?://')
+
+# --- Regression: natural greeting answered locally with "Kya hua sir" -------
+Check 'greeting opener uses Kya hua sir' ($jsText -match "Kya hua sir\? Main bilkul theek hoon")
+Check 'greeting regex accepts Hello Jarvis kaise ho' ($jsText -match 'kaise\\s\+ho\|kese\\s\+ho' -and $jsText -match 'hey\|hi\|hello\|hallo')
+
+# --- Regression: native tool args must be JSON strings, not JS objects ------
+Check 'call_status passes JSON string to executeTool' ($jsText -match "executeTool\('call_status'\s*,\s*JSON\.stringify\(\{\}\)")
+Check 'overlay_highlight label passes JSON string to executeTool' ($jsText -match "executeTool\('overlay_highlight'\s*,\s*JSON\.stringify\(\{")
+Check 'generic tool path stringifies args' ($jsText -match "Native\.executeTool\(name,\s*JSON\.stringify\(args \|\| \{\}\)")
+
+# --- Regression: SpeechRecognizer extras expect Integer, not Long -----------
+Check 'STT complete-silence extra is Integer' ($speechText -match 'EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS,\s*1200\)' -and $speechText -notmatch 'EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS,\s*1200L')
+Check 'STT possibly-complete extra is Integer' ($speechText -match 'EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS,\s*1000\)' -and $speechText -notmatch 'EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS,\s*1000L')
+Check 'STT minimum-length extra is Integer' ($speechText -match 'EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS,\s*650\)' -and $speechText -notmatch 'EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS,\s*650L')
 
 if (Get-Command node -ErrorAction SilentlyContinue) {
   & node --check $js 2>&1 | Out-Null
